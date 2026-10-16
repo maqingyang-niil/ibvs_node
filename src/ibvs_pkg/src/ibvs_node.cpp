@@ -9,7 +9,6 @@
 #include <memory>
 #include "cv_bridge/cv_bridge.hpp"
 #include <sensor_msgs/image_encodings.hpp>
-
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
@@ -61,7 +60,7 @@ public:
             std::bind(&IbvsNode::publishLatestCommand,this)
         );
         RCLCPP_INFO(this->get_logger(),"创建速度发布定时器完成");
-        const cv::Mat desired_image=cv::imread("/home/khadas/desired_image.png",cv::IMREAD_COLOR);
+        const cv::Mat desired_image=cv::imread("/home/khadas/ibvs_node/desired_images/desired_image2.jpg",cv::IMREAD_COLOR);
         if (desired_image.empty()) {
             throw std::runtime_error("期望图像为空");
         }
@@ -200,14 +199,17 @@ private:
 
             if (color_image.empty()||depth_image.empty()){
                 updateZeroCommand(color_msg->header.frame_id);
+                RCLCPP_INFO(this->get_logger(),"color或者depth图像为空");
                 return;
             }
             if (color_image.rows != depth_image.rows||color_image.cols != depth_image.cols) {
+                RCLCPP_INFO(this->get_logger(),"color或者depth图像大小不符");
                 updateZeroCommand(color_msg->header.frame_id);
                 return;
             }
             const DetectionResult detection=detector_->detect(color_image,depth_image,depth_msg->encoding);
-            if (!detection.success||detection.confidence<0.5){
+            if (!detection.success || detection.confidence < 0.5) {
+                RCLCPP_INFO(this->get_logger(),"检测不成功或者置信度小于0.5 (success=%d, confidence=%.3f)",detection.success, detection.confidence);
                 updateZeroCommand(color_msg->header.frame_id);
                 return;
             }
