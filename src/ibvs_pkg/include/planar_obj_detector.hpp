@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ibvs_controller.hpp"
+#include "detection_result.hpp"
 
 #include <string>
 #include <vector>
@@ -8,13 +8,6 @@
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
-
-struct DetectionResult{
-    bool success{false};
-    IbvsController::PixelPoints pixel_points{};
-    IbvsController::Depths depths=IbvsController::Depths::Zero();
-    double confidence{0.0};
-};
 
 class PlanarObjectFeatureDetector{
 public:

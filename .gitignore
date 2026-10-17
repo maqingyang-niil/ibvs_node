@@ -40,6 +40,14 @@ compile_commands.json
 __pycache__/
 *.py[cod]
 
+# Local Python virtual environments
+/.venv/
+/venv/
+/yolo-export-env/
+
+# Ultralytics prediction and training output
+/runs/
+
 # Test and coverage output
 .pytest_cache/
 .coverage
@@ -50,4 +58,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-desired_images/
+# Local runtime assets; deploy these separately with rsync
+/desired_images/
+/models/

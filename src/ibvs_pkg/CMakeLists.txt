@@ -19,15 +19,13 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS
   core
   imgproc
-  imgcodecs
-  features2d
-  calib3d
+  dnn
 )
 
 add_executable(ibvs_node
   src/ibvs_node.cpp
   src/ibvs_controller.cpp
-  src/planar_obj_detector.cpp
+  src/yolo_obj_detector.cpp
 )
 
 target_include_directories(ibvs_node PRIVATE

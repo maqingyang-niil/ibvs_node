@@ -10,10 +10,8 @@
 #include "cv_bridge/cv_bridge.hpp"
 #include <sensor_msgs/image_encodings.hpp>
 #include <opencv2/core.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 #include "ibvs_controller.hpp"
-#include "planar_obj_detector.hpp"
+#include "yolo_obj_detector.hpp"
 #include <chrono>
 #include <mutex>
 
@@ -60,13 +58,59 @@ public:
             std::bind(&IbvsNode::publishLatestCommand,this)
         );
         RCLCPP_INFO(this->get_logger(),"创建速度发布定时器完成");
-        const cv::Mat desired_image=cv::imread("/home/khadas/ibvs_node/desired_images/desired_image2.jpg",cv::IMREAD_COLOR);
-        if (desired_image.empty()) {
-            throw std::runtime_error("期望图像为空");
-        }
-        const cv::Rect target_roi(0,0,desired_image.cols,desired_image.rows);
-        detector_=std::make_unique<PlanarObjectFeatureDetector>(desired_image,target_roi,0.001);
-        RCLCPP_INFO(this->get_logger(),"IBVS节点初始化完成");
+
+        const std::string model_path=this->declare_parameter<std::string>(
+            "yolo_model_path",
+            "/home/cronusiius/Code/ibvs_node/models/yolov8n.onnx"
+        );
+        const double depth_scale=this->declare_parameter<double>(
+            "depth_scale",
+            0.001
+        );
+        detection_confidence_threshold_=static_cast<float>(
+            this->declare_parameter<double>("yolo_confidence_threshold",0.5)
+        );
+        const float nms_threshold=static_cast<float>(
+            this->declare_parameter<double>("yolo_nms_threshold",0.45)
+        );
+        const int input_size=this->declare_parameter<int>(
+            "yolo_input_size",
+            640
+        );
+        const int banana_class_id=this->declare_parameter<int>(
+            "banana_class_id",
+            46
+        );
+        const float desired_center_u_ratio=static_cast<float>(
+            this->declare_parameter<double>("desired_center_u_ratio",0.5)
+        );
+        const float desired_center_v_ratio=static_cast<float>(
+            this->declare_parameter<double>("desired_center_v_ratio",0.5)
+        );
+        const float desired_box_width_ratio=static_cast<float>(
+            this->declare_parameter<double>("desired_box_width_ratio",0.4)
+        );
+        const float desired_box_height_ratio=static_cast<float>(
+            this->declare_parameter<double>("desired_box_height_ratio",0.4)
+        );
+
+        detector_=std::make_unique<YoloBananaDetector>(
+            model_path,
+            depth_scale,
+            detection_confidence_threshold_,
+            nms_threshold,
+            input_size,
+            banana_class_id,
+            desired_center_u_ratio,
+            desired_center_v_ratio,
+            desired_box_width_ratio,
+            desired_box_height_ratio
+        );
+        RCLCPP_INFO(
+            this->get_logger(),
+            "YOLO香蕉检测器初始化完成，模型: %s，期望框比例: center=(%.2f, %.2f), size=(%.2f, %.2f)",
+            model_path.c_str(),desired_center_u_ratio,desired_center_v_ratio,desired_box_width_ratio,desired_box_height_ratio
+        );
 
     }
 
@@ -92,7 +136,8 @@ private:
     std::vector<double> dist_coeffs_;
     Eigen::Matrix3d K_=Eigen::Matrix3d::Identity();
     std::unique_ptr<IbvsController> controller_;
-    std::unique_ptr<PlanarObjectFeatureDetector> detector_;
+    std::unique_ptr<YoloBananaDetector> detector_;
+    float detection_confidence_threshold_{0.5F};
     void updateLatestCommand(const IbvsController::CameraVelocity& velocity,const std::string& frame_id){
         std::lock_guard<std::mutex> lock(lastest_command_mutex_);
         if (velocity.allFinite()){
@@ -208,14 +253,20 @@ private:
                 return;
             }
             const DetectionResult detection=detector_->detect(color_image,depth_image,depth_msg->encoding);
-            if (!detection.success || detection.confidence < 0.5) {
-                RCLCPP_INFO(this->get_logger(),"检测不成功或者置信度小于0.5 (success=%d, confidence=%.3f)",detection.success, detection.confidence);
+            if (!detection.success || detection.confidence < detection_confidence_threshold_) {
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "检测不成功或者置信度低于%.2f (success=%d, confidence=%.3f)",
+                    detection_confidence_threshold_,
+                    detection.success,
+                    detection.confidence
+                );
                 updateZeroCommand(color_msg->header.frame_id);
                 return;
             }
             const IbvsController::CameraVelocity velocity=controller_->computeCommand(
                 detection.pixel_points,
-                detector_->desiredPixelPoints(),
+                detector_->desiredPixelPoints(color_image.size()),
                 detection.depths,
                 IbvsController::InteractionMode::Current
             );
