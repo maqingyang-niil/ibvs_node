@@ -41,7 +41,7 @@ cv::Mat convertToGray(const cv::Mat& image) {
 } // namespace
 
 PlanarObjectFeatureDetector::PlanarObjectFeatureDetector(const cv::Mat& desired_image, const cv::Rect& roi, double depth_scale)
-    : orb_(cv::ORB::create(1500)), matcher_(cv::BFMatcher::create(cv::NORM_HAMMING, false)), depth_scale_(depth_scale) {
+    : sift_(cv::SIFT::create(1500)), matcher_(cv::BFMatcher::create(cv::NORM_L2, false)), depth_scale_(depth_scale) {
     if (desired_image.empty()) {
         throw std::invalid_argument("期望图像为空");
     }
@@ -57,7 +57,7 @@ PlanarObjectFeatureDetector::PlanarObjectFeatureDetector(const cv::Mat& desired_
      * 将控制点从ROI边界向内部移动，
      * 避免深度落到目标边缘或背景。
      */
-    constexpr float margin = 0.15F;
+    constexpr float margin = 0.30F;
     const float left = static_cast<float>(roi.x) + margin * static_cast<float>(roi.width);
     const float right = static_cast<float>(roi.x) + (1.0F - margin) * static_cast<float>(roi.width);
     const float top = static_cast<float>(roi.y) + margin * static_cast<float>(roi.height);
@@ -65,7 +65,7 @@ PlanarObjectFeatureDetector::PlanarObjectFeatureDetector(const cv::Mat& desired_
     desired_pixel_points_ = {cv::Point2f(left, top), cv::Point2f(right, top), cv::Point2f(right, bottom), cv::Point2f(left, bottom)};
 
     /*
-     * 创建ROI掩膜，只提取目标区域内的ORB特征。
+     * 创建ROI掩膜，只提取目标区域内的SIFT特征。
      */
     cv::Mat reference_mask = cv::Mat::zeros(desired_image.rows, desired_image.cols, CV_8UC1);
 
@@ -73,10 +73,10 @@ PlanarObjectFeatureDetector::PlanarObjectFeatureDetector(const cv::Mat& desired_
 
     const cv::Mat desired_gray = convertToGray(desired_image);
 
-    orb_->detectAndCompute(desired_gray, reference_mask, reference_keypoints_, reference_descriptors_);
+    sift_->detectAndCompute(desired_gray, reference_mask, reference_keypoints_, reference_descriptors_);
 
     if (reference_descriptors_.empty() || reference_keypoints_.size() < 12) {
-        throw std::runtime_error("期望图像ROI中的ORB特征不足");
+        throw std::runtime_error("期望图像ROI中的SIFT特征不足");
     }
 }
 
@@ -97,8 +97,8 @@ DetectionResult PlanarObjectFeatureDetector::detect(const cv::Mat& color_image, 
 
     cv::Mat current_descriptors;
 
-    orb_->detectAndCompute(current_gray, cv::noArray(), current_keypoints, current_descriptors);
-    // 当前检测到得ORB特征点的数量
+    sift_->detectAndCompute(current_gray, cv::noArray(), current_keypoints, current_descriptors);
+    // 当前检测到的SIFT特征点数量
     std::cout << "[detect] current_keypoints=" << current_keypoints.size() << std::endl;
 
     if (current_descriptors.empty() || current_keypoints.empty()) {
@@ -133,7 +133,7 @@ DetectionResult PlanarObjectFeatureDetector::detect(const cv::Mat& color_image, 
             good_matches.push_back(first);
         }
     }
-    // 参考图中的ORB特征点的数量
+    // 参考图中的SIFT特征点数量
     std::cout << "[detect] reference_keypoints=" << reference_keypoints_.size() << ", good_matches=" << good_matches.size() << std::endl;
 
     if (good_matches.size() < 12) {

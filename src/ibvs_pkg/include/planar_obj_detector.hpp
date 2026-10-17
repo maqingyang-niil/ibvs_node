@@ -41,7 +41,7 @@ private:
         const std::string& depth_encoding
     ) const;
 
-    cv::Ptr<cv::ORB> orb_;
+    cv::Ptr<cv::SIFT> sift_;
 
     cv::Ptr<cv::DescriptorMatcher> matcher_;
 
