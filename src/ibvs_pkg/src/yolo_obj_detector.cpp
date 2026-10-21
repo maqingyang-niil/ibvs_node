@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 #include <stdexcept>
@@ -11,9 +12,9 @@
 YoloBananaDetector::YoloBananaDetector(const std::string &model_path, double depth_scale, float confidence_threshold, float nms_threshold, int input_size,
                                        int banana_class_id, float desired_center_u_ratio, float desired_center_v_ratio, float desired_box_width_ratio,
                                        float desired_box_height_ratio)
-    : depth_scale_(depth_scale), confidence_threshold_(confidence_threshold), nms_threshold_(nms_threshold), input_size_(input_size),
-      banana_class_id_(banana_class_id), desired_center_u_ratio_(desired_center_u_ratio), desired_center_v_ratio_(desired_center_v_ratio),
-      desired_box_width_ratio_(desired_box_width_ratio), desired_box_height_ratio_(desired_box_height_ratio) {
+    : ort_env_(ORT_LOGGING_LEVEL_WARNING, "ibvs_yolo"), depth_scale_(depth_scale), confidence_threshold_(confidence_threshold), nms_threshold_(nms_threshold),
+      input_size_(input_size), banana_class_id_(banana_class_id), desired_center_u_ratio_(desired_center_u_ratio),
+      desired_center_v_ratio_(desired_center_v_ratio), desired_box_width_ratio_(desired_box_width_ratio), desired_box_height_ratio_(desired_box_height_ratio) {
     if (model_path.empty()) { throw std::invalid_argument("YOLO模型路径为空"); }
 
     if (!std::isfinite(depth_scale_) || depth_scale_ <= 0.0) { throw std::invalid_argument("深度比例必须是有效正数"); }
@@ -36,12 +37,23 @@ YoloBananaDetector::YoloBananaDetector(const std::string &model_path, double dep
         throw std::invalid_argument("期望框超出归一化图像范围");
     }
 
-    net_ = cv::dnn::readNetFromONNX(model_path);
+    ort_session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    ort_session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+    ort_session_ = std::make_unique<Ort::Session>(ort_env_, model_path.c_str(), ort_session_options_);
 
-    if (net_.empty()) { throw std::runtime_error("YOLO模型加载失败: " + model_path); }
+    if (ort_session_->GetInputCount() != 1 || ort_session_->GetOutputCount() < 1) { throw std::runtime_error("YOLO模型输入输出数量不受支持"); }
 
-    net_.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
-    net_.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+    Ort::AllocatorWithDefaultOptions allocator;
+    const auto input_name = ort_session_->GetInputNameAllocated(0, allocator);
+    const auto output_name = ort_session_->GetOutputNameAllocated(0, allocator);
+    input_name_ = input_name.get();
+    output_name_ = output_name.get();
+
+    const std::vector<int64_t> input_shape = ort_session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    if (input_shape.size() != 4 || (input_shape[1] != 3 && input_shape[1] != -1) || (input_shape[2] != input_size_ && input_shape[2] != -1) ||
+        (input_shape[3] != input_size_ && input_shape[3] != -1)) {
+        throw std::runtime_error("YOLO模型输入形状与配置不匹配");
+    }
 }
 
 YoloBananaDetector::LetterboxResult YoloBananaDetector::letterbox(const cv::Mat &image) const {
@@ -84,26 +96,35 @@ std::optional<YoloBananaDetector::BananaBox> YoloBananaDetector::detectBestBanan
 
     const LetterboxResult prepared = letterbox(image);
 
-    const cv::Mat blob = cv::dnn::blobFromImage(prepared.image, 1.0 / 255.0, cv::Size(input_size_, input_size_), cv::Scalar(), true, false);
+    cv::Mat rgb_float;
+    cv::cvtColor(prepared.image, rgb_float, cv::COLOR_BGR2RGB);
+    rgb_float.convertTo(rgb_float, CV_32FC3, 1.0 / 255.0);
 
-    net_.setInput(blob);
+    const std::size_t plane_size = static_cast<std::size_t>(input_size_) * static_cast<std::size_t>(input_size_);
+    std::vector<float> input_values(3 * plane_size);
+    std::vector<cv::Mat> input_channels;
+    input_channels.reserve(3);
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        input_channels.emplace_back(input_size_, input_size_, CV_32F, input_values.data() + channel * plane_size);
+    }
+    cv::split(rgb_float, input_channels);
 
-    std::vector<cv::Mat> outputs;
+    const std::array<int64_t, 4> input_shape{1, 3, input_size_, input_size_};
+    const Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input_values.data(), input_values.size(), input_shape.data(), input_shape.size());
+    const char *input_names[] = {input_name_.c_str()};
+    const char *output_names[] = {output_name_.c_str()};
+    std::vector<Ort::Value> outputs = ort_session_->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
 
-    net_.forward(outputs, net_.getUnconnectedOutLayersNames());
+    if (outputs.empty() || !outputs.front().IsTensor()) { return std::nullopt; }
 
-    if (outputs.empty()) { return std::nullopt; }
+    const auto output_info = outputs.front().GetTensorTypeAndShapeInfo();
+    const std::vector<int64_t> output_shape = output_info.GetShape();
+    if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) { throw std::runtime_error("YOLO输出类型不是float32"); }
+    if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[1] <= 0 || output_shape[2] <= 0) { throw std::runtime_error("不支持的YOLO输出维度"); }
 
-    cv::Mat output = outputs.front();
-
-    if (output.type() != CV_32F) { throw std::runtime_error("YOLO输出类型不是CV_32F"); }
-
-    if (output.dims != 3 || output.size[0] != 1) { throw std::runtime_error("不支持的YOLO输出维度"); }
-
-    if (!output.isContinuous()) { output = output.clone(); }
-
-    const int dimension_one = output.size[1];
-    const int dimension_two = output.size[2];
+    const int dimension_one = static_cast<int>(output_shape[1]);
+    const int dimension_two = static_cast<int>(output_shape[2]);
 
     /*
      * 当前模型输出为：
@@ -123,11 +144,12 @@ std::optional<YoloBananaDetector::BananaBox> YoloBananaDetector::detectBestBanan
     cv::Mat predictions;
 
     if (attributes_first) {
-        const cv::Mat raw(attribute_count, prediction_count, CV_32F, output.ptr<float>());
+        const cv::Mat raw(attribute_count, prediction_count, CV_32F, outputs.front().GetTensorMutableData<float>());
 
         cv::transpose(raw, predictions);
     } else {
-        predictions = cv::Mat(prediction_count, attribute_count, CV_32F, output.ptr<float>());
+        const cv::Mat raw(prediction_count, attribute_count, CV_32F, outputs.front().GetTensorMutableData<float>());
+        predictions = raw.clone();
     }
 
     std::vector<cv::Rect> candidate_boxes;
@@ -260,18 +282,32 @@ DetectionResult YoloBananaDetector::detect(const cv::Mat &color_image, const cv:
 
     if (!banana.has_value()) { return result; }
 
+    result.confidence = banana->confidence;
+
     result.pixel_points = boxToPoints(banana->box);
+
+    std::vector<double> valid_depths;
+    valid_depths.reserve(result.pixel_points.size());
 
     for (std::size_t index = 0; index < result.pixel_points.size(); ++index) {
         const double depth = readDepthMedian(depth_image, result.pixel_points[index], depth_encoding);
 
-        if (!std::isfinite(depth) || depth <= 0.0) { return DetectionResult{}; }
+        if (!std::isfinite(depth) || depth <= 0.0) {
+            if (result.invalid_depth_index < 0) { result.invalid_depth_index = static_cast<int>(index); }
+            continue;
+        }
 
-        result.depths(static_cast<Eigen::Index>(index)) = depth;
+        valid_depths.push_back(depth);
     }
 
-    result.confidence = banana->confidence;
+    if (valid_depths.size() < 2) { return result; }
 
+    std::sort(valid_depths.begin(), valid_depths.end());
+    const std::size_t middle = valid_depths.size() / 2;
+    const double representative_depth = valid_depths.size() % 2 == 1 ? valid_depths[middle] : 0.5 * (valid_depths[middle - 1] + valid_depths[middle]);
+    result.depths.setConstant(representative_depth);
+
+    result.invalid_depth_index = -1;
     result.success = true;
 
     return result;

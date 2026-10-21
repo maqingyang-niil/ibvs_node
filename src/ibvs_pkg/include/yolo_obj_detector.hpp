@@ -1,7 +1,8 @@
 #pragma once
 
+#include <memory>
+#include <onnxruntime_cxx_api.h>
 #include <opencv2/core.hpp>
-#include <opencv2/dnn.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,7 +10,7 @@
 #include "detection_result.hpp"
 
 class YoloBananaDetector {
-public:
+  public:
     YoloBananaDetector(const std::string &model_path, double depth_scale, float confidence_threshold = 0.5F, float nms_threshold = 0.45F, int input_size = 640,
                        int banana_class_id = 46, float desired_center_u_ratio = 0.5F, float desired_center_v_ratio = 0.5F, float desired_box_width_ratio = 0.4F,
                        float desired_box_height_ratio = 0.4F);
@@ -18,7 +19,7 @@ public:
 
     IbvsController::PixelPoints desiredPixelPoints(const cv::Size &image_size) const;
 
-private:
+  private:
     struct BananaBox {
         cv::Rect2f box;
         float confidence{0.0F};
@@ -39,7 +40,11 @@ private:
 
     double readDepthMedian(const cv::Mat &depth_image, const cv::Point2f &point, const std::string &depth_encoding) const;
 
-    cv::dnn::Net net_;
+    Ort::Env ort_env_;
+    Ort::SessionOptions ort_session_options_;
+    std::unique_ptr<Ort::Session> ort_session_;
+    std::string input_name_;
+    std::string output_name_;
 
     double depth_scale_;
     float confidence_threshold_;

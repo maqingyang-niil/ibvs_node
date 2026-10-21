@@ -11,7 +11,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <opencv2/core.hpp>
 #include "ibvs_controller.hpp"
-#include "yolo_obj_detector.hpp"
+#include "red_button_detector.hpp"
 #include <chrono>
 #include <mutex>
 
@@ -53,63 +53,52 @@ public:
             10
         );
         RCLCPP_INFO(this->get_logger(),"创建/ibvs/velocity完成");
+        velocity_callback_group_=this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         velocity_timer_=this->create_wall_timer(
             std::chrono::milliseconds(20),
-            std::bind(&IbvsNode::publishLatestCommand,this)
+            std::bind(&IbvsNode::publishLatestCommand,this),
+            velocity_callback_group_
         );
         RCLCPP_INFO(this->get_logger(),"创建速度发布定时器完成");
 
-        const std::string model_path=this->declare_parameter<std::string>(
-            "yolo_model_path",
-            "/home/cronusiius/Code/ibvs_node/models/yolov8n.onnx"
-        );
         const double depth_scale=this->declare_parameter<double>(
             "depth_scale",
             0.001
         );
-        detection_confidence_threshold_=static_cast<float>(
-            this->declare_parameter<double>("yolo_confidence_threshold",0.5)
-        );
-        const float nms_threshold=static_cast<float>(
-            this->declare_parameter<double>("yolo_nms_threshold",0.45)
-        );
-        const int input_size=this->declare_parameter<int>(
-            "yolo_input_size",
-            640
-        );
-        const int banana_class_id=this->declare_parameter<int>(
-            "banana_class_id",
-            46
-        );
+        const int button_minimum_saturation=this->declare_parameter<int>("button_minimum_saturation",90);
+        const int button_minimum_value=this->declare_parameter<int>("button_minimum_value",50);
+        const double button_minimum_area_ratio=this->declare_parameter<double>("button_minimum_area_ratio",0.0005);
+        const double button_maximum_area_ratio=this->declare_parameter<double>("button_maximum_area_ratio",0.08);
+        const double button_minimum_circularity=this->declare_parameter<double>("button_minimum_circularity",0.65);
+        const double button_maximum_center_offset_ratio=this->declare_parameter<double>("button_maximum_center_offset_ratio",0.25);
+        button_minimum_detection_score_=this->declare_parameter<double>("button_minimum_detection_score",0.65);
         const float desired_center_u_ratio=static_cast<float>(
             this->declare_parameter<double>("desired_center_u_ratio",0.5)
         );
         const float desired_center_v_ratio=static_cast<float>(
             this->declare_parameter<double>("desired_center_v_ratio",0.5)
         );
-        const float desired_box_width_ratio=static_cast<float>(
-            this->declare_parameter<double>("desired_box_width_ratio",0.4)
-        );
-        const float desired_box_height_ratio=static_cast<float>(
-            this->declare_parameter<double>("desired_box_height_ratio",0.4)
-        );
+        const float desired_button_radius_ratio=static_cast<float>(this->declare_parameter<double>("desired_button_radius_ratio",0.08));
+        const float button_feature_offset_ratio=static_cast<float>(this->declare_parameter<double>("button_feature_offset_ratio",0.35));
 
-        detector_=std::make_unique<YoloBananaDetector>(
-            model_path,
+        detector_=std::make_unique<RedButtonDetector>(
             depth_scale,
-            detection_confidence_threshold_,
-            nms_threshold,
-            input_size,
-            banana_class_id,
+            button_minimum_saturation,
+            button_minimum_value,
+            button_minimum_area_ratio,
+            button_maximum_area_ratio,
+            button_minimum_circularity,
+            button_maximum_center_offset_ratio,
+            button_minimum_detection_score_,
             desired_center_u_ratio,
             desired_center_v_ratio,
-            desired_box_width_ratio,
-            desired_box_height_ratio
+            desired_button_radius_ratio,
+            button_feature_offset_ratio
         );
         RCLCPP_INFO(
             this->get_logger(),
-            "YOLO香蕉检测器初始化完成，模型: %s，期望框比例: center=(%.2f, %.2f), size=(%.2f, %.2f)",
-            model_path.c_str(),desired_center_u_ratio,desired_center_v_ratio,desired_box_width_ratio,desired_box_height_ratio
+            "红色按钮检测器初始化完成，期望圆: center=(%.2f, %.2f), radius=%.2f",
+            desired_center_u_ratio,desired_center_v_ratio,desired_button_radius_ratio
         );
 
     }
@@ -124,6 +113,7 @@ private:
     };
     LatestCommand latest_command_;
     std::mutex lastest_command_mutex_;
+    rclcpp::CallbackGroup::SharedPtr velocity_callback_group_;
     rclcpp::TimerBase::SharedPtr velocity_timer_;
     const std::chrono::milliseconds command_timeout_{200};
     using ImageMsg=sensor_msgs::msg::Image;
@@ -136,8 +126,8 @@ private:
     std::vector<double> dist_coeffs_;
     Eigen::Matrix3d K_=Eigen::Matrix3d::Identity();
     std::unique_ptr<IbvsController> controller_;
-    std::unique_ptr<YoloBananaDetector> detector_;
-    float detection_confidence_threshold_{0.5F};
+    std::unique_ptr<RedButtonDetector> detector_;
+    double button_minimum_detection_score_{0.65};
     void updateLatestCommand(const IbvsController::CameraVelocity& velocity,const std::string& frame_id){
         std::lock_guard<std::mutex> lock(lastest_command_mutex_);
         if (velocity.allFinite()){
@@ -253,14 +243,20 @@ private:
                 return;
             }
             const DetectionResult detection=detector_->detect(color_image,depth_image,depth_msg->encoding);
-            if (!detection.success || detection.confidence < detection_confidence_threshold_) {
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "检测不成功或者置信度低于%.2f (success=%d, confidence=%.3f)",
-                    detection_confidence_threshold_,
-                    detection.success,
-                    detection.confidence
-                );
+            if (!detection.success) {
+                if (detection.invalid_depth_index>=0){
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),*get_clock(),2000,
+                        "已检测到中间红色按钮 (score=%.3f)，但按钮内部没有有效深度",
+                        detection.confidence
+                    );
+                }else{
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),*get_clock(),2000,
+                        "没有检测到得分不低于%.2f的中间红色按钮",
+                        button_minimum_detection_score_
+                    );
+                }
                 updateZeroCommand(color_msg->header.frame_id);
                 return;
             }
@@ -291,7 +287,10 @@ private:
 
 int main(int argc,char** argv){
     rclcpp::init(argc,argv);
-    rclcpp::spin(std::make_shared<IbvsNode>());
+    const auto node=std::make_shared<IbvsNode>();
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(),2);
+    executor.add_node(node);
+    executor.spin();
     rclcpp::shutdown();
     return 0;
 }

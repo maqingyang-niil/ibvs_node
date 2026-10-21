@@ -7,4 +7,5 @@ struct DetectionResult {
     IbvsController::PixelPoints pixel_points{};
     IbvsController::Depths depths{IbvsController::Depths::Zero()};
     double confidence{0.0};
+    int invalid_depth_index{-1};
 };
