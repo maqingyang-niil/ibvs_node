@@ -173,8 +173,28 @@ def generate_launch_description():
         condition=IfCondition(enable_velocity_transform),
     )
 
+    hand_delta_pose_node = Node(
+        package="ibvs_pkg",
+        executable="hand_delta_pose_node",
+        name="hand_delta_pose_node",
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(enable_velocity_transform),
+    )
+
+    hand_new_pose_node = Node(
+        package="ibvs_pkg",
+        executable="hand_new_pose_node",
+        name="hand_new_pose_node",
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(enable_velocity_transform),
+    )
+
     return LaunchDescription(launch_arguments + [
         realsense_launch,
         ibvs_node,
         velocity_transform_node,
+        hand_delta_pose_node,
+        hand_new_pose_node,
     ])

@@ -23,7 +23,7 @@ public:
         : Node("hand_velocity_node")
     {
         input_topic_=this->declare_parameter<std::string>("input_topic","/ibvs/velocity");
-        output_topic_=this->declare_parameter<std::string>("output_topic","/ibvs/tool_velocity");
+        output_topic_=this->declare_parameter<std::string>("output_topic","/ibvs/hand_velocity");
         expected_input_frame_=this->declare_parameter<std::string>("expected_input_frame","camera_color_optical_frame");
         output_frame_id_=this->declare_parameter<std::string>("output_frame_id","tool");
         const auto rotation_values=this->declare_parameter<std::vector<double>>(
