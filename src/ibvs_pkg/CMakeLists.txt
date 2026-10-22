@@ -27,14 +27,26 @@ add_executable(ibvs_node
   src/red_button_detector.cpp
 )
 
+add_executable(hand_velocity_node
+  src/hand_velocity_node.cpp
+)
+
 target_include_directories(ibvs_node PRIVATE
   include
   ${OpenCV_INCLUDE_DIRS}
 )
 
+target_include_directories(hand_velocity_node PRIVATE
+  include
+)
+
 target_link_libraries(ibvs_node
   Eigen3::Eigen
   ${OpenCV_LIBRARIES}
+)
+
+target_link_libraries(hand_velocity_node
+  Eigen3::Eigen
 )
 
 ament_target_dependencies(ibvs_node
@@ -45,7 +57,14 @@ ament_target_dependencies(ibvs_node
   cv_bridge
 )
 
-install(TARGETS ibvs_node
+ament_target_dependencies(hand_velocity_node
+  rclcpp
+  geometry_msgs
+)
+
+install(TARGETS
+  ibvs_node
+  hand_velocity_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -3,6 +3,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -22,6 +23,7 @@ def generate_launch_description():
     desired_center_v_ratio = LaunchConfiguration("desired_center_v_ratio")
     desired_button_radius_ratio = LaunchConfiguration("desired_button_radius_ratio")
     button_feature_offset_ratio = LaunchConfiguration("button_feature_offset_ratio")
+    enable_velocity_transform = LaunchConfiguration("enable_velocity_transform")
 
     launch_arguments = [
         DeclareLaunchArgument(
@@ -83,6 +85,11 @@ def generate_launch_description():
             "button_feature_offset_ratio",
             default_value="0.35",
             description="四个IBVS特征点相对按钮半径的偏移比例",
+        ),
+        DeclareLaunchArgument(
+            "enable_velocity_transform",
+            default_value="false",
+            description="是否启动相机速度到工具速度的转换节点",
         ),
     ]
 
@@ -157,7 +164,17 @@ def generate_launch_description():
         }],
     )
 
+    velocity_transform_node = Node(
+        package="ibvs_pkg",
+        executable="hand_velocity_node",
+        name="hand_velocity_node",
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(enable_velocity_transform),
+    )
+
     return LaunchDescription(launch_arguments + [
         realsense_launch,
         ibvs_node,
+        velocity_transform_node,
     ])
