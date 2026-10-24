@@ -94,7 +94,7 @@ private:
     {
         Eigen::Quaterniond orientation;
         if (!finitePose(*message)||!orientationFromPose(*message,orientation)){
-            RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),2000,"当前位姿无效，无法用于目标位姿初始化");
+            RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),2000,"当前位姿无效，无法用于目标位姿计算");
             return;
         }
 
@@ -102,19 +102,12 @@ private:
         current_orientation_=orientation;
         last_current_pose_time_=std::chrono::steady_clock::now();
         has_current_pose_=true;
-        if (!integration_started_){
-            target_position_=current_position_;
-            target_orientation_=current_orientation_;
-            target_frame_id_=current_pose_frame_id_;
-            last_delta_stamp_ns_=0;
-        }
     }
 
     void deltaPoseCallback(const PoseStamped::ConstSharedPtr message)
     {
         const auto now=std::chrono::steady_clock::now();
         if (!has_current_pose_||now-last_current_pose_time_>std::chrono::duration<double>(current_pose_timeout_)){
-            integration_started_=false;
             RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),2000,"当前机械臂位姿不可用或已超时，拒绝合成增量位姿");
             return;
         }
@@ -154,14 +147,9 @@ private:
             return;
         }
 
-        if (!integration_started_){
-            target_position_=current_position_;
-            target_orientation_=current_orientation_;
-            target_frame_id_=current_pose_frame_id_;
-            integration_started_=true;
-        }
-        target_position_+=target_orientation_*delta_translation;
-        target_orientation_=(target_orientation_*delta_orientation).normalized();
+        target_position_=current_position_+current_orientation_*delta_translation;
+        target_orientation_=(current_orientation_*delta_orientation).normalized();
+        target_frame_id_=current_pose_frame_id_;
         last_delta_stamp_ns_=delta_stamp_ns;
         publishTargetPose(message->header.stamp);
     }
@@ -197,7 +185,6 @@ private:
     std::chrono::steady_clock::time_point last_current_pose_time_{};
     std::int64_t last_delta_stamp_ns_=0;
     bool has_current_pose_=false;
-    bool integration_started_=false;
     rclcpp::Subscription<Pose>::SharedPtr current_pose_sub_;
     rclcpp::Subscription<PoseStamped>::SharedPtr delta_pose_sub_;
     rclcpp::Publisher<PoseStamped>::SharedPtr target_pose_pub_;
