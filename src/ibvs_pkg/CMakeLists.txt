@@ -19,12 +19,31 @@ find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS
   core
   imgproc
+  dnn
 )
+
+set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime解压目录")
+find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+  HINTS
+    ${ONNXRUNTIME_ROOT}/include
+    $ENV{ONNXRUNTIME_ROOT}/include
+)
+find_library(ONNXRUNTIME_LIBRARY onnxruntime
+  HINTS
+    ${ONNXRUNTIME_ROOT}/lib
+    $ENV{ONNXRUNTIME_ROOT}/lib
+)
+
+if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+  message(FATAL_ERROR "找不到ONNX Runtime。请设置ONNXRUNTIME_ROOT为ONNX Runtime解压目录")
+endif()
+
+get_filename_component(ONNXRUNTIME_LIBRARY_DIR "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
 
 add_executable(ibvs_node
   src/ibvs_node.cpp
   src/ibvs_controller.cpp
-  src/red_button_detector.cpp
+  src/yolo_red_button_detector.cpp
 )
 
 add_executable(hand_velocity_node
@@ -42,6 +61,7 @@ add_executable(hand_new_pose_node
 target_include_directories(ibvs_node PRIVATE
   include
   ${OpenCV_INCLUDE_DIRS}
+  ${ONNXRUNTIME_INCLUDE_DIR}
 )
 
 target_include_directories(hand_velocity_node PRIVATE
@@ -59,6 +79,12 @@ target_include_directories(hand_new_pose_node PRIVATE
 target_link_libraries(ibvs_node
   Eigen3::Eigen
   ${OpenCV_LIBRARIES}
+  ${ONNXRUNTIME_LIBRARY}
+)
+
+set_target_properties(ibvs_node PROPERTIES
+  BUILD_RPATH "${ONNXRUNTIME_LIBRARY_DIR}"
+  INSTALL_RPATH "${ONNXRUNTIME_LIBRARY_DIR}"
 )
 
 target_link_libraries(hand_velocity_node

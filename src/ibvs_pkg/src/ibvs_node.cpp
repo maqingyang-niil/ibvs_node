@@ -11,7 +11,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <opencv2/core.hpp>
 #include "ibvs_controller.hpp"
-#include "red_button_detector.hpp"
+#include "yolo_red_button_detector.hpp"
 #include <chrono>
 #include <mutex>
 
@@ -65,13 +65,12 @@ public:
             "depth_scale",
             0.001
         );
-        const int button_minimum_saturation=this->declare_parameter<int>("button_minimum_saturation",90);
-        const int button_minimum_value=this->declare_parameter<int>("button_minimum_value",50);
-        const double button_minimum_area_ratio=this->declare_parameter<double>("button_minimum_area_ratio",0.0005);
-        const double button_maximum_area_ratio=this->declare_parameter<double>("button_maximum_area_ratio",0.08);
-        const double button_minimum_circularity=this->declare_parameter<double>("button_minimum_circularity",0.65);
+        const std::string model_path=this->declare_parameter<std::string>("yolo_model_path","");
+        detection_confidence_threshold_=static_cast<float>(this->declare_parameter<double>("yolo_confidence_threshold",0.5));
+        const float nms_threshold=static_cast<float>(this->declare_parameter<double>("yolo_nms_threshold",0.45));
+        const int input_size=this->declare_parameter<int>("yolo_input_size",640);
+        const int button_class_id=this->declare_parameter<int>("yolo_button_class_id",0);
         const double button_maximum_center_offset_ratio=this->declare_parameter<double>("button_maximum_center_offset_ratio",0.25);
-        button_minimum_detection_score_=this->declare_parameter<double>("button_minimum_detection_score",0.65);
         const float desired_center_u_ratio=static_cast<float>(
             this->declare_parameter<double>("desired_center_u_ratio",0.5)
         );
@@ -81,15 +80,14 @@ public:
         const float desired_button_radius_ratio=static_cast<float>(this->declare_parameter<double>("desired_button_radius_ratio",0.08));
         const float button_feature_offset_ratio=static_cast<float>(this->declare_parameter<double>("button_feature_offset_ratio",0.35));
 
-        detector_=std::make_unique<RedButtonDetector>(
+        detector_=std::make_unique<YoloRedButtonDetector>(
+            model_path,
             depth_scale,
-            button_minimum_saturation,
-            button_minimum_value,
-            button_minimum_area_ratio,
-            button_maximum_area_ratio,
-            button_minimum_circularity,
+            detection_confidence_threshold_,
+            nms_threshold,
+            input_size,
+            button_class_id,
             button_maximum_center_offset_ratio,
-            button_minimum_detection_score_,
             desired_center_u_ratio,
             desired_center_v_ratio,
             desired_button_radius_ratio,
@@ -97,8 +95,8 @@ public:
         );
         RCLCPP_INFO(
             this->get_logger(),
-            "红色按钮检测器初始化完成，期望圆: center=(%.2f, %.2f), radius=%.2f",
-            desired_center_u_ratio,desired_center_v_ratio,desired_button_radius_ratio
+            "YOLO红色按钮检测器初始化完成，模型: %s，类别编号: %d，期望圆: center=(%.2f, %.2f), radius=%.2f",
+            model_path.c_str(),button_class_id,desired_center_u_ratio,desired_center_v_ratio,desired_button_radius_ratio
         );
 
     }
@@ -126,8 +124,8 @@ private:
     std::vector<double> dist_coeffs_;
     Eigen::Matrix3d K_=Eigen::Matrix3d::Identity();
     std::unique_ptr<IbvsController> controller_;
-    std::unique_ptr<RedButtonDetector> detector_;
-    double button_minimum_detection_score_{0.65};
+    std::unique_ptr<YoloRedButtonDetector> detector_;
+    float detection_confidence_threshold_{0.5F};
     void updateLatestCommand(const IbvsController::CameraVelocity& velocity,const std::string& frame_id){
         std::lock_guard<std::mutex> lock(lastest_command_mutex_);
         if (velocity.allFinite()){
@@ -253,8 +251,8 @@ private:
                 }else{
                     RCLCPP_INFO_THROTTLE(
                         this->get_logger(),*get_clock(),2000,
-                        "没有检测到得分不低于%.2f的中间红色按钮",
-                        button_minimum_detection_score_
+                        "YOLO没有检测到置信度不低于%.2f的中间红色按钮",
+                        detection_confidence_threshold_
                     );
                 }
                 updateZeroCommand(color_msg->header.frame_id);

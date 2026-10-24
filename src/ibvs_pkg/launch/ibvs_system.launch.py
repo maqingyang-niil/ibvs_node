@@ -12,13 +12,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     depth_scale = LaunchConfiguration("depth_scale")
-    button_minimum_saturation = LaunchConfiguration("button_minimum_saturation")
-    button_minimum_value = LaunchConfiguration("button_minimum_value")
-    button_minimum_area_ratio = LaunchConfiguration("button_minimum_area_ratio")
-    button_maximum_area_ratio = LaunchConfiguration("button_maximum_area_ratio")
-    button_minimum_circularity = LaunchConfiguration("button_minimum_circularity")
+    yolo_model_path = LaunchConfiguration("yolo_model_path")
+    yolo_confidence_threshold = LaunchConfiguration("yolo_confidence_threshold")
+    yolo_nms_threshold = LaunchConfiguration("yolo_nms_threshold")
+    yolo_input_size = LaunchConfiguration("yolo_input_size")
+    yolo_button_class_id = LaunchConfiguration("yolo_button_class_id")
     button_maximum_center_offset_ratio = LaunchConfiguration("button_maximum_center_offset_ratio")
-    button_minimum_detection_score = LaunchConfiguration("button_minimum_detection_score")
     desired_center_u_ratio = LaunchConfiguration("desired_center_u_ratio")
     desired_center_v_ratio = LaunchConfiguration("desired_center_v_ratio")
     desired_button_radius_ratio = LaunchConfiguration("desired_button_radius_ratio")
@@ -32,39 +31,34 @@ def generate_launch_description():
             description="16UC1深度值转换为米的比例",
         ),
         DeclareLaunchArgument(
-            "button_minimum_saturation",
-            default_value="90",
-            description="红色按钮最小HSV饱和度",
+            "yolo_model_path",
+            default_value=os.path.expanduser("~/best.onnx"),
+            description="YOLO红色按钮ONNX模型路径",
         ),
         DeclareLaunchArgument(
-            "button_minimum_value",
-            default_value="50",
-            description="红色按钮最小HSV亮度",
+            "yolo_confidence_threshold",
+            default_value="0.5",
+            description="YOLO红色按钮最小置信度",
         ),
         DeclareLaunchArgument(
-            "button_minimum_area_ratio",
-            default_value="0.0005",
-            description="红色按钮轮廓最小面积比例",
+            "yolo_nms_threshold",
+            default_value="0.45",
+            description="YOLO非极大值抑制阈值",
         ),
         DeclareLaunchArgument(
-            "button_maximum_area_ratio",
-            default_value="0.08",
-            description="红色按钮轮廓最大面积比例",
+            "yolo_input_size",
+            default_value="640",
+            description="YOLO模型输入尺寸",
         ),
         DeclareLaunchArgument(
-            "button_minimum_circularity",
-            default_value="0.65",
-            description="红色按钮轮廓最小圆度",
+            "yolo_button_class_id",
+            default_value="0",
+            description="YOLO红色按钮类别编号",
         ),
         DeclareLaunchArgument(
             "button_maximum_center_offset_ratio",
             default_value="0.25",
             description="候选按钮相对期望中心的最大归一化偏移",
-        ),
-        DeclareLaunchArgument(
-            "button_minimum_detection_score",
-            default_value="0.65",
-            description="红色按钮最小综合检测得分",
         ),
         DeclareLaunchArgument(
             "desired_center_u_ratio",
@@ -117,32 +111,28 @@ def generate_launch_description():
                 depth_scale,
                 value_type=float,
             ),
-            "button_minimum_saturation": ParameterValue(
-                button_minimum_saturation,
+            "yolo_model_path": ParameterValue(
+                yolo_model_path,
+                value_type=str,
+            ),
+            "yolo_confidence_threshold": ParameterValue(
+                yolo_confidence_threshold,
+                value_type=float,
+            ),
+            "yolo_nms_threshold": ParameterValue(
+                yolo_nms_threshold,
+                value_type=float,
+            ),
+            "yolo_input_size": ParameterValue(
+                yolo_input_size,
                 value_type=int,
             ),
-            "button_minimum_value": ParameterValue(
-                button_minimum_value,
+            "yolo_button_class_id": ParameterValue(
+                yolo_button_class_id,
                 value_type=int,
-            ),
-            "button_minimum_area_ratio": ParameterValue(
-                button_minimum_area_ratio,
-                value_type=float,
-            ),
-            "button_maximum_area_ratio": ParameterValue(
-                button_maximum_area_ratio,
-                value_type=float,
-            ),
-            "button_minimum_circularity": ParameterValue(
-                button_minimum_circularity,
-                value_type=float,
             ),
             "button_maximum_center_offset_ratio": ParameterValue(
                 button_maximum_center_offset_ratio,
-                value_type=float,
-            ),
-            "button_minimum_detection_score": ParameterValue(
-                button_minimum_detection_score,
                 value_type=float,
             ),
             "desired_center_u_ratio": ParameterValue(
