@@ -9,18 +9,21 @@
 
 #include <Eigen/Geometry>
 #include <builtin_interfaces/msg/time.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 class HandNewPoseNode : public rclcpp::Node
 {
 public:
+    using Pose = geometry_msgs::msg::Pose;
     using PoseStamped = geometry_msgs::msg::PoseStamped;
 
     HandNewPoseNode()
         : Node("hand_new_pose_node")
     {
-        current_pose_topic_=this->declare_parameter<std::string>("current_pose_topic","/ibvs/hand_current_pose");
+        current_pose_topic_=this->declare_parameter<std::string>("current_pose_topic","/rm_driver/udp_arm_position");
+        current_pose_frame_id_=this->declare_parameter<std::string>("current_pose_frame_id","base_link");
         delta_pose_topic_=this->declare_parameter<std::string>("delta_pose_topic","/ibvs/hand_delta_pose");
         output_topic_=this->declare_parameter<std::string>("output_topic","/ibvs/hand_new_pose");
         expected_delta_frame_=this->declare_parameter<std::string>("expected_delta_frame","tool");
@@ -32,7 +35,9 @@ public:
         if (!std::isfinite(max_delta_rotation_)||max_delta_rotation_<=0.0){throw std::invalid_argument("max_delta_rotation必须是有限正数");}
 
         target_pose_pub_=this->create_publisher<PoseStamped>(output_topic_,10);
-        current_pose_sub_=this->create_subscription<PoseStamped>(
+        if (current_pose_frame_id_.empty()){throw std::invalid_argument("current_pose_frame_id不能为空");}
+
+        current_pose_sub_=this->create_subscription<Pose>(
             current_pose_topic_,
             rclcpp::SensorDataQoS(),
             std::bind(&HandNewPoseNode::currentPoseCallback,this,std::placeholders::_1));
@@ -43,19 +48,20 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "订阅当前位姿%s和增量位姿%s，发布新目标位姿%s",
+            "订阅当前位姿%s（坐标系%s）和增量位姿%s，发布新目标位姿%s",
             current_pose_topic_.c_str(),
+            current_pose_frame_id_.c_str(),
             delta_pose_topic_.c_str(),
             output_topic_.c_str());
     }
 
 private:
-    static bool finitePose(const PoseStamped& message)
+    static bool finitePose(const Pose& pose)
     {
-        return std::isfinite(message.pose.position.x)&&std::isfinite(message.pose.position.y)&&
-               std::isfinite(message.pose.position.z)&&std::isfinite(message.pose.orientation.x)&&
-               std::isfinite(message.pose.orientation.y)&&std::isfinite(message.pose.orientation.z)&&
-               std::isfinite(message.pose.orientation.w);
+        return std::isfinite(pose.position.x)&&std::isfinite(pose.position.y)&&
+               std::isfinite(pose.position.z)&&std::isfinite(pose.orientation.x)&&
+               std::isfinite(pose.orientation.y)&&std::isfinite(pose.orientation.z)&&
+               std::isfinite(pose.orientation.w);
     }
 
     static std::int64_t stampNanoseconds(const builtin_interfaces::msg::Time& stamp)
@@ -63,44 +69,43 @@ private:
         return static_cast<std::int64_t>(stamp.sec)*1000000000LL+static_cast<std::int64_t>(stamp.nanosec);
     }
 
-    static Eigen::Vector3d positionFromMessage(const PoseStamped& message)
+    static Eigen::Vector3d positionFromPose(const Pose& pose)
     {
         return Eigen::Vector3d(
-            message.pose.position.x,
-            message.pose.position.y,
-            message.pose.position.z);
+            pose.position.x,
+            pose.position.y,
+            pose.position.z);
     }
 
-    static bool orientationFromMessage(const PoseStamped& message,Eigen::Quaterniond& orientation)
+    static bool orientationFromPose(const Pose& pose,Eigen::Quaterniond& orientation)
     {
         orientation=Eigen::Quaterniond(
-            message.pose.orientation.w,
-            message.pose.orientation.x,
-            message.pose.orientation.y,
-            message.pose.orientation.z);
+            pose.orientation.w,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z);
         const double norm=orientation.norm();
         if (!std::isfinite(norm)||norm<1.0e-9){return false;}
         orientation.normalize();
         return true;
     }
 
-    void currentPoseCallback(const PoseStamped::ConstSharedPtr message)
+    void currentPoseCallback(const Pose::ConstSharedPtr message)
     {
         Eigen::Quaterniond orientation;
-        if (!finitePose(*message)||message->header.frame_id.empty()||!orientationFromMessage(*message,orientation)){
+        if (!finitePose(*message)||!orientationFromPose(*message,orientation)){
             RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),2000,"当前位姿无效，无法用于目标位姿初始化");
             return;
         }
 
-        current_position_=positionFromMessage(*message);
+        current_position_=positionFromPose(*message);
         current_orientation_=orientation;
-        current_frame_id_=message->header.frame_id;
         last_current_pose_time_=std::chrono::steady_clock::now();
         has_current_pose_=true;
         if (!integration_started_){
             target_position_=current_position_;
             target_orientation_=current_orientation_;
-            target_frame_id_=current_frame_id_;
+            target_frame_id_=current_pose_frame_id_;
             last_delta_stamp_ns_=0;
         }
     }
@@ -125,7 +130,7 @@ private:
         }
 
         Eigen::Quaterniond delta_orientation;
-        if (!finitePose(*message)||!orientationFromMessage(*message,delta_orientation)){
+        if (!finitePose(message->pose)||!orientationFromPose(message->pose,delta_orientation)){
             RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),2000,"增量位姿无效，拒绝合成");
             return;
         }
@@ -135,7 +140,7 @@ private:
             return;
         }
 
-        const Eigen::Vector3d delta_translation=positionFromMessage(*message);
+        const Eigen::Vector3d delta_translation=positionFromPose(message->pose);
         const double delta_translation_norm=delta_translation.norm();
         const double delta_rotation_angle=2.0*std::acos(std::clamp(std::abs(delta_orientation.w()),0.0,1.0));
         if (delta_translation_norm>max_delta_translation_||delta_rotation_angle>max_delta_rotation_){
@@ -152,7 +157,7 @@ private:
         if (!integration_started_){
             target_position_=current_position_;
             target_orientation_=current_orientation_;
-            target_frame_id_=current_frame_id_;
+            target_frame_id_=current_pose_frame_id_;
             integration_started_=true;
         }
         target_position_+=target_orientation_*delta_translation;
@@ -177,6 +182,7 @@ private:
     }
 
     std::string current_pose_topic_;
+    std::string current_pose_frame_id_;
     std::string delta_pose_topic_;
     std::string output_topic_;
     std::string expected_delta_frame_;
@@ -187,13 +193,12 @@ private:
     Eigen::Quaterniond current_orientation_=Eigen::Quaterniond::Identity();
     Eigen::Vector3d target_position_=Eigen::Vector3d::Zero();
     Eigen::Quaterniond target_orientation_=Eigen::Quaterniond::Identity();
-    std::string current_frame_id_;
     std::string target_frame_id_;
     std::chrono::steady_clock::time_point last_current_pose_time_{};
     std::int64_t last_delta_stamp_ns_=0;
     bool has_current_pose_=false;
     bool integration_started_=false;
-    rclcpp::Subscription<PoseStamped>::SharedPtr current_pose_sub_;
+    rclcpp::Subscription<Pose>::SharedPtr current_pose_sub_;
     rclcpp::Subscription<PoseStamped>::SharedPtr delta_pose_sub_;
     rclcpp::Publisher<PoseStamped>::SharedPtr target_pose_pub_;
 };
