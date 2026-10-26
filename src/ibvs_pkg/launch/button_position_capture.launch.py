@@ -13,12 +13,11 @@ def generate_launch_description():
     yolo_engine_path = LaunchConfiguration("yolo_engine_path")
     yolo_confidence_threshold = LaunchConfiguration("yolo_confidence_threshold")
     current_pose_topic = LaunchConfiguration("current_pose_topic")
-    output_topic = LaunchConfiguration("output_topic")
     output_pose_topic = LaunchConfiguration("output_pose_topic")
-    output_pose_hand_topic = LaunchConfiguration("output_pose_hand_topic")
+    output_pose_link6_topic = LaunchConfiguration("output_pose_link6_topic")
     output_pose_camera_topic = LaunchConfiguration("output_pose_camera_topic")
     base_frame_id = LaunchConfiguration("base_frame_id")
-    hand_frame_id = LaunchConfiguration("hand_frame_id")
+    link6_frame_id = LaunchConfiguration("link6_frame_id")
     camera_frame_id = LaunchConfiguration("camera_frame_id")
     required_stable_detections = LaunchConfiguration("required_stable_detections")
 
@@ -39,18 +38,13 @@ def generate_launch_description():
             description="机械臂末端在基座坐标系中的当前位姿话题",
         ),
         DeclareLaunchArgument(
-            "output_topic",
-            default_value="/ibvs/button_position",
-            description="一次性按钮基座坐标输出话题",
-        ),
-        DeclareLaunchArgument(
             "output_pose_topic",
             default_value="/ibvs/button_pose",
             description="一次性按钮基座6D位姿输出话题",
         ),
         DeclareLaunchArgument(
-            "output_pose_hand_topic",
-            default_value="/ibvs/button_pose_hand",
+            "output_pose_link6_topic",
+            default_value="/ibvs/button_pose_link6",
             description="一次性按钮link6坐标系6D位姿输出话题",
         ),
         DeclareLaunchArgument(
@@ -64,7 +58,7 @@ def generate_launch_description():
             description="按钮位置输出坐标系",
         ),
         DeclareLaunchArgument(
-            "hand_frame_id",
+            "link6_frame_id",
             default_value="link6",
             description="按钮末端相对位姿输出坐标系",
         ),
@@ -103,12 +97,11 @@ def generate_launch_description():
             "yolo_engine_path": ParameterValue(yolo_engine_path, value_type=str),
             "yolo_confidence_threshold": ParameterValue(yolo_confidence_threshold, value_type=float),
             "current_pose_topic": ParameterValue(current_pose_topic, value_type=str),
-            "output_topic": ParameterValue(output_topic, value_type=str),
             "output_pose_topic": ParameterValue(output_pose_topic, value_type=str),
-            "output_pose_hand_topic": ParameterValue(output_pose_hand_topic, value_type=str),
+            "output_pose_link6_topic": ParameterValue(output_pose_link6_topic, value_type=str),
             "output_pose_camera_topic": ParameterValue(output_pose_camera_topic, value_type=str),
             "base_frame_id": ParameterValue(base_frame_id, value_type=str),
-            "hand_frame_id": ParameterValue(hand_frame_id, value_type=str),
+            "link6_frame_id": ParameterValue(link6_frame_id, value_type=str),
             "camera_frame_id": ParameterValue(camera_frame_id, value_type=str),
             "required_stable_detections": ParameterValue(required_stable_detections, value_type=int),
         }],
