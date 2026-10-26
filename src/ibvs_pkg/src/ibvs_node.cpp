@@ -2,12 +2,12 @@
 #include "Eigen/Core"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
-#include <message_filters/subscriber.hpp>
-#include <message_filters/synchronizer.hpp>
-#include <message_filters/sync_policies/approximate_time.hpp>
+#include <message_filters/subscriber.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <memory>
-#include "cv_bridge/cv_bridge.hpp"
+#include "cv_bridge/cv_bridge.h"
 #include <sensor_msgs/image_encodings.hpp>
 #include <opencv2/core.hpp>
 #include "ibvs_controller.hpp"
@@ -65,7 +65,7 @@ public:
             "depth_scale",
             0.001
         );
-        const std::string model_path=this->declare_parameter<std::string>("yolo_model_path","");
+        const std::string engine_path=this->declare_parameter<std::string>("yolo_engine_path","");
         detection_confidence_threshold_=static_cast<float>(this->declare_parameter<double>("yolo_confidence_threshold",0.5));
         const float nms_threshold=static_cast<float>(this->declare_parameter<double>("yolo_nms_threshold",0.45));
         const int input_size=this->declare_parameter<int>("yolo_input_size",640);
@@ -81,7 +81,7 @@ public:
         const float button_feature_offset_ratio=static_cast<float>(this->declare_parameter<double>("button_feature_offset_ratio",0.35));
 
         detector_=std::make_unique<YoloRedButtonDetector>(
-            model_path,
+            engine_path,
             depth_scale,
             detection_confidence_threshold_,
             nms_threshold,
@@ -95,8 +95,8 @@ public:
         );
         RCLCPP_INFO(
             this->get_logger(),
-            "YOLO红色按钮检测器初始化完成，模型: %s，类别编号: %d，期望圆: center=(%.2f, %.2f), radius=%.2f",
-            model_path.c_str(),button_class_id,desired_center_u_ratio,desired_center_v_ratio,desired_button_radius_ratio
+            "TensorRT YOLO红色按钮检测器初始化完成，engine: %s，类别编号: %d，期望圆: center=(%.2f, %.2f), radius=%.2f",
+            engine_path.c_str(),button_class_id,desired_center_u_ratio,desired_center_v_ratio,desired_button_radius_ratio
         );
 
     }

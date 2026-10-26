@@ -12,7 +12,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     depth_scale = LaunchConfiguration("depth_scale")
-    yolo_model_path = LaunchConfiguration("yolo_model_path")
+    yolo_engine_path = LaunchConfiguration("yolo_engine_path")
     yolo_confidence_threshold = LaunchConfiguration("yolo_confidence_threshold")
     yolo_nms_threshold = LaunchConfiguration("yolo_nms_threshold")
     yolo_input_size = LaunchConfiguration("yolo_input_size")
@@ -31,9 +31,9 @@ def generate_launch_description():
             description="16UC1深度值转换为米的比例",
         ),
         DeclareLaunchArgument(
-            "yolo_model_path",
-            default_value=os.path.expanduser("~/best.onnx"),
-            description="YOLO红色按钮ONNX模型路径",
+            "yolo_engine_path",
+            default_value=os.path.expanduser("~/best_fp16.engine"),
+            description="YOLO红色按钮TensorRT engine路径",
         ),
         DeclareLaunchArgument(
             "yolo_confidence_threshold",
@@ -111,8 +111,8 @@ def generate_launch_description():
                 depth_scale,
                 value_type=float,
             ),
-            "yolo_model_path": ParameterValue(
-                yolo_model_path,
+            "yolo_engine_path": ParameterValue(
+                yolo_engine_path,
                 value_type=str,
             ),
             "yolo_confidence_threshold": ParameterValue(

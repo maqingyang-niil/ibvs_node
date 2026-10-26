@@ -1,9 +1,10 @@
 #include "yolo_red_button_detector.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iostream>
 #include <limits>
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgproc.hpp>
@@ -11,15 +12,25 @@
 #include <stdexcept>
 #include <vector>
 
-YoloRedButtonDetector::YoloRedButtonDetector(const std::string &model_path, double depth_scale, float confidence_threshold, float nms_threshold,
+namespace {
+void checkCuda(cudaError_t status, const char *operation) {
+    if (status != cudaSuccess) { throw std::runtime_error(std::string(operation) + "失败: " + cudaGetErrorString(status)); }
+}
+}
+
+void YoloRedButtonDetector::TensorRtLogger::log(Severity severity, const char *message) noexcept {
+    if (severity <= Severity::kWARNING) { std::cerr << "[TensorRT] " << message << '\n'; }
+}
+
+YoloRedButtonDetector::YoloRedButtonDetector(const std::string &engine_path, double depth_scale, float confidence_threshold, float nms_threshold,
                                              int input_size, int button_class_id, double maximum_center_offset_ratio,
                                              float desired_center_u_ratio, float desired_center_v_ratio, float desired_radius_ratio,
                                              float feature_offset_ratio)
-    : ort_env_(ORT_LOGGING_LEVEL_WARNING, "ibvs_yolo"), depth_scale_(depth_scale), confidence_threshold_(confidence_threshold),
-      nms_threshold_(nms_threshold), input_size_(input_size), button_class_id_(button_class_id),
+    : depth_scale_(depth_scale), confidence_threshold_(confidence_threshold), nms_threshold_(nms_threshold), input_size_(input_size),
+      button_class_id_(button_class_id),
       maximum_center_offset_ratio_(maximum_center_offset_ratio), desired_center_u_ratio_(desired_center_u_ratio),
       desired_center_v_ratio_(desired_center_v_ratio), desired_radius_ratio_(desired_radius_ratio), feature_offset_ratio_(feature_offset_ratio) {
-    if (model_path.empty()) { throw std::invalid_argument("YOLO模型路径为空"); }
+    if (engine_path.empty()) { throw std::invalid_argument("TensorRT engine路径为空"); }
     if (!std::isfinite(depth_scale_) || depth_scale_ <= 0.0) { throw std::invalid_argument("深度比例必须是有效正数"); }
     if (!std::isfinite(confidence_threshold_) || confidence_threshold_ < 0.0F || confidence_threshold_ > 1.0F) {
         throw std::invalid_argument("YOLO置信度阈值必须在[0,1]范围内");
@@ -43,24 +54,98 @@ YoloRedButtonDetector::YoloRedButtonDetector(const std::string &model_path, doub
         throw std::invalid_argument("按钮特征点偏移比例必须在(0,0.70)范围内");
     }
 
-    ort_session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    ort_session_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
-    ort_session_ = std::make_unique<Ort::Session>(ort_env_, model_path.c_str(), ort_session_options_);
-    if (ort_session_->GetInputCount() != 1 || ort_session_->GetOutputCount() < 1) {
-        throw std::runtime_error("YOLO模型输入输出数量不受支持");
+    try {
+        initializeTensorRt(engine_path);
+    } catch (...) {
+        releaseCudaResources();
+        throw;
+    }
+}
+
+YoloRedButtonDetector::~YoloRedButtonDetector() { releaseCudaResources(); }
+
+std::size_t YoloRedButtonDetector::tensorElementCount(const nvinfer1::Dims &dimensions) {
+    if (dimensions.nbDims <= 0) { throw std::runtime_error("TensorRT张量维度为空"); }
+    std::size_t count = 1;
+    for (int index = 0; index < dimensions.nbDims; ++index) {
+        if (dimensions.d[index] <= 0) { throw std::runtime_error("TensorRT engine包含动态或无效张量维度"); }
+        count *= static_cast<std::size_t>(dimensions.d[index]);
+    }
+    return count;
+}
+
+void YoloRedButtonDetector::initializeTensorRt(const std::string &engine_path) {
+    std::ifstream engine_file(engine_path, std::ios::binary | std::ios::ate);
+    if (!engine_file) { throw std::runtime_error("无法打开TensorRT engine: " + engine_path); }
+
+    const std::streamsize engine_size = engine_file.tellg();
+    if (engine_size <= 0) { throw std::runtime_error("TensorRT engine文件为空: " + engine_path); }
+    engine_file.seekg(0, std::ios::beg);
+    std::vector<char> engine_data(static_cast<std::size_t>(engine_size));
+    if (!engine_file.read(engine_data.data(), engine_size)) { throw std::runtime_error("读取TensorRT engine失败: " + engine_path); }
+
+    tensor_rt_runtime_.reset(nvinfer1::createInferRuntime(tensor_rt_logger_));
+    if (!tensor_rt_runtime_) { throw std::runtime_error("创建TensorRT runtime失败"); }
+    tensor_rt_engine_.reset(tensor_rt_runtime_->deserializeCudaEngine(engine_data.data(), engine_data.size()));
+    if (!tensor_rt_engine_) { throw std::runtime_error("反序列化TensorRT engine失败，请检查设备和TensorRT版本"); }
+    tensor_rt_context_.reset(tensor_rt_engine_->createExecutionContext());
+    if (!tensor_rt_context_) { throw std::runtime_error("创建TensorRT执行上下文失败"); }
+
+    int input_count = 0;
+    int output_count = 0;
+    const int io_tensor_count = tensor_rt_engine_->getNbIOTensors();
+    for (int index = 0; index < io_tensor_count; ++index) {
+        const char *tensor_name = tensor_rt_engine_->getIOTensorName(index);
+        if (tensor_name == nullptr) { throw std::runtime_error("TensorRT engine包含无效I/O名称"); }
+        const nvinfer1::TensorIOMode mode = tensor_rt_engine_->getTensorIOMode(tensor_name);
+        if (mode == nvinfer1::TensorIOMode::kINPUT) {
+            input_name_ = tensor_name;
+            ++input_count;
+        } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
+            output_name_ = tensor_name;
+            ++output_count;
+        }
+    }
+    if (input_count != 1 || output_count != 1) { throw std::runtime_error("TensorRT engine必须恰好包含一个输入和一个输出"); }
+    if (tensor_rt_engine_->getTensorDataType(input_name_.c_str()) != nvinfer1::DataType::kFLOAT ||
+        tensor_rt_engine_->getTensorDataType(output_name_.c_str()) != nvinfer1::DataType::kFLOAT) {
+        throw std::runtime_error("TensorRT engine输入输出必须是float32");
     }
 
-    Ort::AllocatorWithDefaultOptions allocator;
-    const auto input_name = ort_session_->GetInputNameAllocated(0, allocator);
-    const auto output_name = ort_session_->GetOutputNameAllocated(0, allocator);
-    input_name_ = input_name.get();
-    output_name_ = output_name.get();
-
-    const std::vector<int64_t> input_shape = ort_session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-    if (input_shape.size() != 4 || (input_shape[1] != 3 && input_shape[1] != -1) ||
-        (input_shape[2] != input_size_ && input_shape[2] != -1) || (input_shape[3] != input_size_ && input_shape[3] != -1)) {
-        throw std::runtime_error("YOLO模型输入形状与yolo_input_size配置不匹配");
+    const nvinfer1::Dims input_dimensions = tensor_rt_engine_->getTensorShape(input_name_.c_str());
+    if (input_dimensions.nbDims != 4 || input_dimensions.d[0] != 1 || input_dimensions.d[1] != 3 ||
+        input_dimensions.d[2] != input_size_ || input_dimensions.d[3] != input_size_) {
+        throw std::runtime_error("TensorRT engine输入形状与yolo_input_size配置不匹配");
     }
+
+    const nvinfer1::Dims output_dimensions = tensor_rt_engine_->getTensorShape(output_name_.c_str());
+    if (output_dimensions.nbDims != 3 || output_dimensions.d[0] != 1 || output_dimensions.d[1] <= 0 || output_dimensions.d[2] <= 0) {
+        throw std::runtime_error("TensorRT engine输出应为(1,属性数,预测数)或(1,预测数,属性数)");
+    }
+    output_attributes_first_ = output_dimensions.d[1] < output_dimensions.d[2];
+    output_attribute_count_ = static_cast<int>(output_attributes_first_ ? output_dimensions.d[1] : output_dimensions.d[2]);
+    output_prediction_count_ = static_cast<int>(output_attributes_first_ ? output_dimensions.d[2] : output_dimensions.d[1]);
+    if (output_attribute_count_ <= 4 + button_class_id_) { throw std::runtime_error("TensorRT engine输出类别数量不足"); }
+
+    input_element_count_ = tensorElementCount(input_dimensions);
+    output_element_count_ = tensorElementCount(output_dimensions);
+    checkCuda(cudaStreamCreate(&cuda_stream_), "创建CUDA stream");
+    checkCuda(cudaMalloc(&device_input_, input_element_count_ * sizeof(float)), "分配TensorRT输入显存");
+    checkCuda(cudaMalloc(&device_output_, output_element_count_ * sizeof(float)), "分配TensorRT输出显存");
+    if (!tensor_rt_context_->setTensorAddress(input_name_.c_str(), device_input_) ||
+        !tensor_rt_context_->setTensorAddress(output_name_.c_str(), device_output_)) {
+        throw std::runtime_error("设置TensorRT输入输出地址失败");
+    }
+}
+
+void YoloRedButtonDetector::releaseCudaResources() noexcept {
+    if (cuda_stream_ != nullptr) { cudaStreamSynchronize(cuda_stream_); }
+    if (device_output_ != nullptr) { cudaFree(device_output_); }
+    if (device_input_ != nullptr) { cudaFree(device_input_); }
+    if (cuda_stream_ != nullptr) { cudaStreamDestroy(cuda_stream_); }
+    device_output_ = nullptr;
+    device_input_ = nullptr;
+    cuda_stream_ = nullptr;
 }
 
 YoloRedButtonDetector::LetterboxResult YoloRedButtonDetector::letterbox(const cv::Mat &image) const {
@@ -105,35 +190,21 @@ std::optional<YoloRedButtonDetector::ButtonBox> YoloRedButtonDetector::detectBes
     }
     cv::split(rgb_float, input_channels);
 
-    const std::array<int64_t, 4> input_shape{1, 3, input_size_, input_size_};
-    const Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value input_tensor =
-        Ort::Value::CreateTensor<float>(memory_info, input_values.data(), input_values.size(), input_shape.data(), input_shape.size());
-    const char *input_names[] = {input_name_.c_str()};
-    const char *output_names[] = {output_name_.c_str()};
-    std::vector<Ort::Value> outputs = ort_session_->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
-    if (outputs.empty() || !outputs.front().IsTensor()) { return std::nullopt; }
-
-    const auto output_info = outputs.front().GetTensorTypeAndShapeInfo();
-    const std::vector<int64_t> output_shape = output_info.GetShape();
-    if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) { throw std::runtime_error("YOLO输出类型不是float32"); }
-    if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[1] <= 0 || output_shape[2] <= 0) {
-        throw std::runtime_error("YOLO输出应为(1,属性数,预测数)或(1,预测数,属性数)");
-    }
-
-    const int dimension_one = static_cast<int>(output_shape[1]);
-    const int dimension_two = static_cast<int>(output_shape[2]);
-    const bool attributes_first = dimension_one < dimension_two;
-    const int attribute_count = attributes_first ? dimension_one : dimension_two;
-    const int prediction_count = attributes_first ? dimension_two : dimension_one;
-    if (attribute_count <= 4 + button_class_id_) { throw std::runtime_error("YOLO输出类别数量不足，请检查yolo_button_class_id"); }
+    if (input_values.size() != input_element_count_) { throw std::runtime_error("TensorRT输入元素数量与engine不匹配"); }
+    std::vector<float> output_values(output_element_count_);
+    checkCuda(cudaMemcpyAsync(device_input_, input_values.data(), input_element_count_ * sizeof(float), cudaMemcpyHostToDevice, cuda_stream_),
+              "复制TensorRT输入到GPU");
+    if (!tensor_rt_context_->enqueueV3(cuda_stream_)) { throw std::runtime_error("TensorRT enqueueV3推理失败"); }
+    checkCuda(cudaMemcpyAsync(output_values.data(), device_output_, output_element_count_ * sizeof(float), cudaMemcpyDeviceToHost, cuda_stream_),
+              "复制TensorRT输出到CPU");
+    checkCuda(cudaStreamSynchronize(cuda_stream_), "等待TensorRT推理完成");
 
     cv::Mat predictions;
-    if (attributes_first) {
-        const cv::Mat raw(attribute_count, prediction_count, CV_32F, outputs.front().GetTensorMutableData<float>());
+    if (output_attributes_first_) {
+        const cv::Mat raw(output_attribute_count_, output_prediction_count_, CV_32F, output_values.data());
         cv::transpose(raw, predictions);
     } else {
-        const cv::Mat raw(prediction_count, attribute_count, CV_32F, outputs.front().GetTensorMutableData<float>());
+        const cv::Mat raw(output_prediction_count_, output_attribute_count_, CV_32F, output_values.data());
         predictions = raw.clone();
     }
 

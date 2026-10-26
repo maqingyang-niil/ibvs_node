@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.18)
 project(ibvs_pkg)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -16,29 +16,27 @@ find_package(geometry_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS
   core
   imgproc
   dnn
 )
 
-set(ONNXRUNTIME_ROOT "" CACHE PATH "ONNX Runtime解压目录")
-find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h
   HINTS
-    ${ONNXRUNTIME_ROOT}/include
-    $ENV{ONNXRUNTIME_ROOT}/include
+    /usr/include/aarch64-linux-gnu
+    /usr/include
 )
-find_library(ONNXRUNTIME_LIBRARY onnxruntime
+find_library(TENSORRT_LIBRARY nvinfer
   HINTS
-    ${ONNXRUNTIME_ROOT}/lib
-    $ENV{ONNXRUNTIME_ROOT}/lib
+    /usr/lib/aarch64-linux-gnu
+    /usr/lib
 )
 
-if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
-  message(FATAL_ERROR "找不到ONNX Runtime。请设置ONNXRUNTIME_ROOT为ONNX Runtime解压目录")
+if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_LIBRARY)
+  message(FATAL_ERROR "找不到TensorRT开发文件，请确认已安装NvInfer.h和libnvinfer.so")
 endif()
-
-get_filename_component(ONNXRUNTIME_LIBRARY_DIR "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
 
 add_executable(ibvs_node
   src/ibvs_node.cpp
@@ -61,7 +59,7 @@ add_executable(hand_new_pose_node
 target_include_directories(ibvs_node PRIVATE
   include
   ${OpenCV_INCLUDE_DIRS}
-  ${ONNXRUNTIME_INCLUDE_DIR}
+  ${TENSORRT_INCLUDE_DIR}
 )
 
 target_include_directories(hand_velocity_node PRIVATE
@@ -79,12 +77,8 @@ target_include_directories(hand_new_pose_node PRIVATE
 target_link_libraries(ibvs_node
   Eigen3::Eigen
   ${OpenCV_LIBRARIES}
-  ${ONNXRUNTIME_LIBRARY}
-)
-
-set_target_properties(ibvs_node PROPERTIES
-  BUILD_RPATH "${ONNXRUNTIME_LIBRARY_DIR}"
-  INSTALL_RPATH "${ONNXRUNTIME_LIBRARY_DIR}"
+  ${TENSORRT_LIBRARY}
+  CUDA::cudart
 )
 
 target_link_libraries(hand_velocity_node
