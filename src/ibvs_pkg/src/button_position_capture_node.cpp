@@ -44,7 +44,13 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         current_pose_topic_ = this->declare_parameter<std::string>("current_pose_topic", "/rm_driver/udp_arm_position");
         output_topic_ = this->declare_parameter<std::string>("output_topic", "/ibvs/button_position");
         output_pose_topic_ = this->declare_parameter<std::string>("output_pose_topic", "/ibvs/button_pose");
+        output_pose_hand_topic_ =
+            this->declare_parameter<std::string>("output_pose_hand_topic", "/ibvs/button_pose_hand");
+        output_pose_camera_topic_ =
+            this->declare_parameter<std::string>("output_pose_camera_topic", "/ibvs/button_pose_camera");
         base_frame_id_ = this->declare_parameter<std::string>("base_frame_id", "base_link");
+        hand_frame_id_ = this->declare_parameter<std::string>("hand_frame_id", "link6");
+        camera_frame_id_ = this->declare_parameter<std::string>("camera_frame_id", "camera_color_optical_frame");
 
         depth_scale_ = this->declare_parameter<double>("depth_scale", 0.001);
         const float confidence_threshold = static_cast<float>(this->declare_parameter<double>("yolo_confidence_threshold", 0.5));
@@ -69,8 +75,9 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         maximum_plane_residual_ = this->declare_parameter<double>("maximum_plane_residual", 0.003);
         minimum_orientation_samples_ = this->declare_parameter<int>("minimum_orientation_samples", 30);
 
-        if (output_topic_.empty() || output_pose_topic_.empty() || base_frame_id_.empty()) {
-            throw std::invalid_argument("输出话题和base_frame_id不能为空");
+        if (output_topic_.empty() || output_pose_topic_.empty() || output_pose_hand_topic_.empty() ||
+            output_pose_camera_topic_.empty() || base_frame_id_.empty() || hand_frame_id_.empty() || camera_frame_id_.empty()) {
+            throw std::invalid_argument("输出话题和坐标系名称不能为空");
         }
         if (rotation_values.size() != 9 || translation_values.size() != 3) {
             throw std::invalid_argument("手眼外参必须包含9个旋转元素和3个平移元素");
@@ -102,6 +109,8 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         position_pub_ = this->create_publisher<PointStamped>(output_topic_, output_qos);
         pose_pub_ = this->create_publisher<PoseStamped>(output_pose_topic_, output_qos);
+        hand_pose_pub_ = this->create_publisher<PoseStamped>(output_pose_hand_topic_, output_qos);
+        camera_pose_pub_ = this->create_publisher<PoseStamped>(output_pose_camera_topic_, output_qos);
         current_pose_sub_ = this->create_subscription<Pose>(
             current_pose_topic_, rclcpp::SensorDataQoS(), std::bind(&ButtonPositionCaptureNode::currentPoseCallback, this, std::placeholders::_1));
         camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -112,8 +121,10 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         image_sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
         image_sync_->registerCallback(&ButtonPositionCaptureNode::imageCallback, this);
 
-        RCLCPP_INFO(this->get_logger(), "等待按钮6D位姿：连续%d帧稳定后发布一次%s和%s，然后停止YOLO推理",
-                    required_stable_detections_, output_topic_.c_str(), output_pose_topic_.c_str());
+        RCLCPP_INFO(this->get_logger(),
+                    "等待按钮6D位姿：连续%d帧稳定后发布一次%s、%s、%s和%s，然后停止YOLO推理",
+                    required_stable_detections_, output_topic_.c_str(), output_pose_topic_.c_str(), output_pose_hand_topic_.c_str(),
+                    output_pose_camera_topic_.c_str());
         RCLCPP_WARN(this->get_logger(), "圆形按钮绕表面法线的旋转不可观测；按钮X轴按相机X轴在按钮平面上的投影定义");
     }
 
@@ -121,6 +132,10 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     struct PositionSample {
         cv::Point2f pixel;
         double depth{0.0};
+        Eigen::Vector3d camera_position{Eigen::Vector3d::Zero()};
+        Eigen::Quaterniond camera_orientation{Eigen::Quaterniond::Identity()};
+        Eigen::Vector3d hand_position{Eigen::Vector3d::Zero()};
+        Eigen::Quaterniond hand_orientation{Eigen::Quaterniond::Identity()};
         Eigen::Vector3d base_position{Eigen::Vector3d::Zero()};
         Eigen::Quaterniond base_orientation{Eigen::Quaterniond::Identity()};
     };
@@ -138,6 +153,51 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         const double upper_middle = values[middle];
         const double lower_middle = *std::max_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(middle));
         return 0.5 * (lower_middle + upper_middle);
+    }
+
+    static Eigen::Vector3d medianPosition(const std::vector<Eigen::Vector3d> &positions) {
+        std::vector<double> x_values;
+        std::vector<double> y_values;
+        std::vector<double> z_values;
+        x_values.reserve(positions.size());
+        y_values.reserve(positions.size());
+        z_values.reserve(positions.size());
+        for (const Eigen::Vector3d &position : positions) {
+            x_values.push_back(position.x());
+            y_values.push_back(position.y());
+            z_values.push_back(position.z());
+        }
+        return Eigen::Vector3d(median(x_values), median(y_values), median(z_values));
+    }
+
+    static Eigen::Quaterniond averageOrientation(const std::vector<Eigen::Quaterniond> &orientations) {
+        Eigen::Vector4d orientation_sum = Eigen::Vector4d::Zero();
+        const Eigen::Quaterniond &orientation_reference = orientations.front();
+        for (const Eigen::Quaterniond &orientation : orientations) {
+            Eigen::Vector4d coefficients = orientation.coeffs();
+            if (orientation_reference.dot(orientation) < 0.0) { coefficients = -coefficients; }
+            orientation_sum += coefficients;
+        }
+        if (orientation_sum.norm() < 1.0e-9) { throw std::runtime_error("稳定姿态四元数平均失败"); }
+        Eigen::Quaterniond average;
+        average.coeffs() = orientation_sum.normalized();
+        if (average.w() < 0.0) { average.coeffs() = -average.coeffs(); }
+        return average;
+    }
+
+    static PoseStamped makePoseMessage(const builtin_interfaces::msg::Time &stamp, const std::string &frame_id,
+                                       const Eigen::Vector3d &position, const Eigen::Quaterniond &orientation) {
+        PoseStamped message;
+        message.header.stamp = stamp;
+        message.header.frame_id = frame_id;
+        message.pose.position.x = position.x();
+        message.pose.position.y = position.y();
+        message.pose.position.z = position.z();
+        message.pose.orientation.x = orientation.x();
+        message.pose.orientation.y = orientation.y();
+        message.pose.orientation.z = orientation.z();
+        message.pose.orientation.w = orientation.w();
+        return message;
     }
 
     double readDepthMeters(const cv::Mat &depth_image, int u, int v, const std::string &depth_encoding) const {
@@ -301,16 +361,20 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
                 return;
             }
             const Eigen::Vector3d tool_position = camera_to_tool_rotation_ * camera_position + camera_to_tool_translation_;
+            Eigen::Quaterniond tool_orientation(camera_to_tool_rotation_ * camera_button_orientation->toRotationMatrix());
+            tool_orientation.normalize();
             const Eigen::Vector3d base_position = base_to_tool_rotation_ * tool_position + base_to_tool_translation_;
-            Eigen::Quaterniond base_orientation(base_to_tool_rotation_ * camera_to_tool_rotation_ * camera_button_orientation->toRotationMatrix());
+            Eigen::Quaterniond base_orientation(base_to_tool_rotation_ * tool_orientation.toRotationMatrix());
             base_orientation.normalize();
             if (!camera_position.allFinite() || !tool_position.allFinite() || !base_position.allFinite() ||
+                !camera_button_orientation->coeffs().allFinite() || !tool_orientation.coeffs().allFinite() ||
                 !base_orientation.coeffs().allFinite()) {
                 stable_samples_.clear();
                 return;
             }
 
-            const PositionSample sample{center, depth, base_position, base_orientation};
+            const PositionSample sample{center,          depth,            camera_position, *camera_button_orientation,
+                                        tool_position, tool_orientation, base_position,   base_orientation};
             if (!stable_samples_.empty()) {
                 const PositionSample &previous = stable_samples_.back();
                 const double pixel_shift = cv::norm(sample.pixel - previous.pixel);
@@ -338,63 +402,72 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     }
 
     void publishLockedPose(const builtin_interfaces::msg::Time &stamp) {
-        std::vector<double> x_values;
-        std::vector<double> y_values;
-        std::vector<double> z_values;
-        x_values.reserve(stable_samples_.size());
-        y_values.reserve(stable_samples_.size());
-        z_values.reserve(stable_samples_.size());
+        std::vector<Eigen::Vector3d> camera_positions;
+        std::vector<Eigen::Vector3d> hand_positions;
+        std::vector<Eigen::Vector3d> base_positions;
+        std::vector<Eigen::Quaterniond> camera_orientations;
+        std::vector<Eigen::Quaterniond> hand_orientations;
+        std::vector<Eigen::Quaterniond> base_orientations;
+        camera_positions.reserve(stable_samples_.size());
+        hand_positions.reserve(stable_samples_.size());
+        base_positions.reserve(stable_samples_.size());
+        camera_orientations.reserve(stable_samples_.size());
+        hand_orientations.reserve(stable_samples_.size());
+        base_orientations.reserve(stable_samples_.size());
         for (const PositionSample &sample : stable_samples_) {
-            x_values.push_back(sample.base_position.x());
-            y_values.push_back(sample.base_position.y());
-            z_values.push_back(sample.base_position.z());
+            camera_positions.push_back(sample.camera_position);
+            hand_positions.push_back(sample.hand_position);
+            base_positions.push_back(sample.base_position);
+            camera_orientations.push_back(sample.camera_orientation);
+            hand_orientations.push_back(sample.hand_orientation);
+            base_orientations.push_back(sample.base_orientation);
         }
 
-        Eigen::Vector4d orientation_sum = Eigen::Vector4d::Zero();
-        const Eigen::Quaterniond &orientation_reference = stable_samples_.front().base_orientation;
-        for (const PositionSample &sample : stable_samples_) {
-            Eigen::Vector4d coefficients = sample.base_orientation.coeffs();
-            if (orientation_reference.dot(sample.base_orientation) < 0.0) { coefficients = -coefficients; }
-            orientation_sum += coefficients;
-        }
-        if (orientation_sum.norm() < 1.0e-9) { throw std::runtime_error("稳定姿态四元数平均失败"); }
-        Eigen::Quaterniond orientation;
-        orientation.coeffs() = orientation_sum.normalized();
-        if (orientation.w() < 0.0) { orientation.coeffs() = -orientation.coeffs(); }
-        const Eigen::Matrix3d rotation = orientation.toRotationMatrix();
+        const Eigen::Vector3d camera_position = medianPosition(camera_positions);
+        const Eigen::Vector3d hand_position = medianPosition(hand_positions);
+        const Eigen::Vector3d base_position = medianPosition(base_positions);
+        const Eigen::Quaterniond camera_orientation = averageOrientation(camera_orientations);
+        const Eigen::Quaterniond hand_orientation = averageOrientation(hand_orientations);
+        const Eigen::Quaterniond base_orientation = averageOrientation(base_orientations);
+        const Eigen::Matrix3d rotation = base_orientation.toRotationMatrix();
         constexpr double degrees_per_radian = 57.29577951308232;
         const double roll = std::atan2(rotation(2, 1), rotation(2, 2)) * degrees_per_radian;
         const double pitch = std::atan2(-rotation(2, 0), std::hypot(rotation(0, 0), rotation(1, 0))) * degrees_per_radian;
         const double yaw = std::atan2(rotation(1, 0), rotation(0, 0)) * degrees_per_radian;
 
-        PoseStamped pose_message;
-        pose_message.header.stamp = stamp;
-        pose_message.header.frame_id = base_frame_id_;
-        pose_message.pose.position.x = median(x_values);
-        pose_message.pose.position.y = median(y_values);
-        pose_message.pose.position.z = median(z_values);
-        pose_message.pose.orientation.x = orientation.x();
-        pose_message.pose.orientation.y = orientation.y();
-        pose_message.pose.orientation.z = orientation.z();
-        pose_message.pose.orientation.w = orientation.w();
+        const PoseStamped pose_message = makePoseMessage(stamp, base_frame_id_, base_position, base_orientation);
+        const PoseStamped hand_pose_message = makePoseMessage(stamp, hand_frame_id_, hand_position, hand_orientation);
+        const PoseStamped camera_pose_message = makePoseMessage(stamp, camera_frame_id_, camera_position, camera_orientation);
 
         PointStamped point_message;
         point_message.header = pose_message.header;
         point_message.point = pose_message.pose.position;
         position_pub_->publish(point_message);
         pose_pub_->publish(pose_message);
+        hand_pose_pub_->publish(hand_pose_message);
+        camera_pose_pub_->publish(camera_pose_message);
         position_locked_ = true;
         RCLCPP_INFO(this->get_logger(),
                     "按钮6D位姿已锁定并停止YOLO推理：%s position=(%.6f, %.6f, %.6f)m quaternion=(%.6f, %.6f, %.6f, %.6f) "
                     "RPY=(%.2f, %.2f, %.2f)deg",
                     base_frame_id_.c_str(), pose_message.pose.position.x, pose_message.pose.position.y, pose_message.pose.position.z,
-                    orientation.x(), orientation.y(), orientation.z(), orientation.w(), roll, pitch, yaw);
+                    base_orientation.x(), base_orientation.y(), base_orientation.z(), base_orientation.w(), roll, pitch, yaw);
+        RCLCPP_INFO(this->get_logger(), "按钮link6位姿：%s position=(%.6f, %.6f, %.6f)m quaternion=(%.6f, %.6f, %.6f, %.6f)",
+                    hand_frame_id_.c_str(), hand_position.x(), hand_position.y(), hand_position.z(), hand_orientation.x(), hand_orientation.y(),
+                    hand_orientation.z(), hand_orientation.w());
+        RCLCPP_INFO(this->get_logger(), "按钮相机位姿：%s position=(%.6f, %.6f, %.6f)m quaternion=(%.6f, %.6f, %.6f, %.6f)",
+                    camera_frame_id_.c_str(), camera_position.x(), camera_position.y(), camera_position.z(), camera_orientation.x(),
+                    camera_orientation.y(), camera_orientation.z(), camera_orientation.w());
     }
 
     std::string current_pose_topic_;
     std::string output_topic_;
     std::string output_pose_topic_;
+    std::string output_pose_hand_topic_;
+    std::string output_pose_camera_topic_;
     std::string base_frame_id_;
+    std::string hand_frame_id_;
+    std::string camera_frame_id_;
     double depth_scale_{0.001};
     double current_pose_timeout_{0.5};
     int required_stable_detections_{5};
@@ -427,6 +500,8 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     rclcpp::Subscription<Pose>::SharedPtr current_pose_sub_;
     rclcpp::Publisher<PointStamped>::SharedPtr position_pub_;
     rclcpp::Publisher<PoseStamped>::SharedPtr pose_pub_;
+    rclcpp::Publisher<PoseStamped>::SharedPtr hand_pose_pub_;
+    rclcpp::Publisher<PoseStamped>::SharedPtr camera_pose_pub_;
 };
 
 int main(int argc, char **argv) {

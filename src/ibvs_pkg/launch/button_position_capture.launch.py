@@ -15,7 +15,11 @@ def generate_launch_description():
     current_pose_topic = LaunchConfiguration("current_pose_topic")
     output_topic = LaunchConfiguration("output_topic")
     output_pose_topic = LaunchConfiguration("output_pose_topic")
+    output_pose_hand_topic = LaunchConfiguration("output_pose_hand_topic")
+    output_pose_camera_topic = LaunchConfiguration("output_pose_camera_topic")
     base_frame_id = LaunchConfiguration("base_frame_id")
+    hand_frame_id = LaunchConfiguration("hand_frame_id")
+    camera_frame_id = LaunchConfiguration("camera_frame_id")
     required_stable_detections = LaunchConfiguration("required_stable_detections")
 
     launch_arguments = [
@@ -45,9 +49,29 @@ def generate_launch_description():
             description="一次性按钮基座6D位姿输出话题",
         ),
         DeclareLaunchArgument(
+            "output_pose_hand_topic",
+            default_value="/ibvs/button_pose_hand",
+            description="一次性按钮link6坐标系6D位姿输出话题",
+        ),
+        DeclareLaunchArgument(
+            "output_pose_camera_topic",
+            default_value="/ibvs/button_pose_camera",
+            description="一次性按钮相机坐标系6D位姿输出话题",
+        ),
+        DeclareLaunchArgument(
             "base_frame_id",
             default_value="base_link",
             description="按钮位置输出坐标系",
+        ),
+        DeclareLaunchArgument(
+            "hand_frame_id",
+            default_value="link6",
+            description="按钮末端相对位姿输出坐标系",
+        ),
+        DeclareLaunchArgument(
+            "camera_frame_id",
+            default_value="camera_color_optical_frame",
+            description="按钮相机相对位姿输出坐标系",
         ),
         DeclareLaunchArgument(
             "required_stable_detections",
@@ -81,7 +105,11 @@ def generate_launch_description():
             "current_pose_topic": ParameterValue(current_pose_topic, value_type=str),
             "output_topic": ParameterValue(output_topic, value_type=str),
             "output_pose_topic": ParameterValue(output_pose_topic, value_type=str),
+            "output_pose_hand_topic": ParameterValue(output_pose_hand_topic, value_type=str),
+            "output_pose_camera_topic": ParameterValue(output_pose_camera_topic, value_type=str),
             "base_frame_id": ParameterValue(base_frame_id, value_type=str),
+            "hand_frame_id": ParameterValue(hand_frame_id, value_type=str),
+            "camera_frame_id": ParameterValue(camera_frame_id, value_type=str),
             "required_stable_detections": ParameterValue(required_stable_detections, value_type=int),
         }],
     )
