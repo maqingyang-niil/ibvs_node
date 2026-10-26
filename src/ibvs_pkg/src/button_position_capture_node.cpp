@@ -22,6 +22,7 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #include "yolo_red_button_detector.hpp"
 
@@ -61,6 +62,10 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
             this->declare_parameter<std::vector<double>>("camera_to_tool_translation", {-0.03669205, -0.09531331, 0.02498297});
         current_pose_timeout_ = this->declare_parameter<double>("current_pose_timeout", 0.5);
         required_stable_detections_ = this->declare_parameter<int>("required_stable_detections", 5);
+        trigger_topic_ = this->declare_parameter<std::string>("trigger_topic", "/ibvs/capture_trigger");
+        status_topic_ = this->declare_parameter<std::string>("status_topic", "/ibvs/capture_success");
+        trigger_settle_duration_ = this->declare_parameter<double>("trigger_settle_duration", 0.5);
+        detection_timeout_ = this->declare_parameter<double>("detection_timeout", 10.0);
         maximum_pixel_shift_ = this->declare_parameter<double>("maximum_pixel_shift", 3.0);
         maximum_depth_change_ = this->declare_parameter<double>("maximum_depth_change", 0.005);
         maximum_position_change_ = this->declare_parameter<double>("maximum_position_change", 0.01);
@@ -73,8 +78,8 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         minimum_orientation_samples_ = this->declare_parameter<int>("minimum_orientation_samples", 30);
 
         if (output_pose_topic_.empty() || output_pose_link6_topic_.empty() || output_pose_camera_topic_.empty() || base_frame_id_.empty() ||
-            link6_frame_id_.empty() || camera_frame_id_.empty()) {
-            throw std::invalid_argument("输出话题和坐标系名称不能为空");
+            link6_frame_id_.empty() || camera_frame_id_.empty() || trigger_topic_.empty() || status_topic_.empty()) {
+            throw std::invalid_argument("输出话题、触发话题、状态话题和坐标系名称不能为空");
         }
         if (rotation_values.size() != 9 || translation_values.size() != 3) {
             throw std::invalid_argument("手眼外参必须包含9个旋转元素和3个平移元素");
@@ -86,7 +91,9 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
             !std::isfinite(orientation_sample_radius_ratio_) || orientation_sample_radius_ratio_ <= 0.0 ||
             orientation_sample_radius_ratio_ > 0.5 || !std::isfinite(orientation_depth_tolerance_) || orientation_depth_tolerance_ <= 0.0 ||
             !std::isfinite(maximum_plane_residual_) || maximum_plane_residual_ <= 0.0 || minimum_orientation_samples_ < 3 ||
-            !std::isfinite(depth_scale_) || depth_scale_ <= 0.0) {
+            !std::isfinite(depth_scale_) || depth_scale_ <= 0.0 ||
+            !std::isfinite(trigger_settle_duration_) || trigger_settle_duration_ < 0.0 ||
+            !std::isfinite(detection_timeout_) || detection_timeout_ <= 0.0) {
             throw std::invalid_argument("一次性按钮位置确认参数无效");
         }
 
@@ -107,6 +114,12 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         pose_pub_ = this->create_publisher<PoseStamped>(output_pose_topic_, output_qos);
         link6_pose_pub_ = this->create_publisher<PoseStamped>(output_pose_link6_topic_, output_qos);
         camera_pose_pub_ = this->create_publisher<PoseStamped>(output_pose_camera_topic_, output_qos);
+        status_pub_ = this->create_publisher<std_msgs::msg::Bool>(status_topic_, output_qos);
+        trigger_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            trigger_topic_, rclcpp::QoS(10).reliable(),
+            std::bind(&ButtonPositionCaptureNode::triggerCallback, this, std::placeholders::_1));
+        timeout_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(100), std::bind(&ButtonPositionCaptureNode::timeoutCallback, this));
         current_pose_sub_ = this->create_subscription<Pose>(
             current_pose_topic_, rclcpp::SensorDataQoS(), std::bind(&ButtonPositionCaptureNode::currentPoseCallback, this, std::placeholders::_1));
         camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -118,13 +131,17 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         image_sync_->registerCallback(&ButtonPositionCaptureNode::imageCallback, this);
 
         RCLCPP_INFO(this->get_logger(),
-                    "等待按钮6D位姿：连续%d帧稳定后发布一次%s、%s和%s，然后停止YOLO推理",
-                    required_stable_detections_, output_pose_topic_.c_str(), output_pose_link6_topic_.c_str(),
-                    output_pose_camera_topic_.c_str());
+                    "触发式按钮检测就绪：等待%s上的触发，收到后连续%d帧稳定即发布%s、%s和%s",
+                    trigger_topic_.c_str(), required_stable_detections_, output_pose_topic_.c_str(),
+                    output_pose_link6_topic_.c_str(), output_pose_camera_topic_.c_str());
+        RCLCPP_INFO(this->get_logger(), "触发后先等待%.2fs让机械臂停稳，之后%.2fs内未锁定则发布%s=false并回到空闲",
+                    trigger_settle_duration_, detection_timeout_, status_topic_.c_str());
         RCLCPP_WARN(this->get_logger(), "圆形按钮绕表面法线的旋转不可观测；按钮X轴按相机X轴在按钮平面上的投影定义");
     }
 
   private:
+    enum class CaptureState { Idle, Settling, Detecting };
+
     struct PositionSample {
         cv::Point2f pixel;
         double depth{0.0};
@@ -310,7 +327,7 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     }
 
     void imageCallback(const Image::ConstSharedPtr &color_message, const Image::ConstSharedPtr &depth_message) {
-        if (position_locked_) { return; }
+        if (state_ != CaptureState::Detecting) { return; }
         if (!camera_info_available_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "等待彩色相机内参");
             stable_samples_.clear();
@@ -438,9 +455,11 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
         pose_pub_->publish(pose_message);
         link6_pose_pub_->publish(link6_pose_message);
         camera_pose_pub_->publish(camera_pose_message);
-        position_locked_ = true;
+        publishStatus(true);
+        state_ = CaptureState::Idle;
+        stable_samples_.clear();
         RCLCPP_INFO(this->get_logger(),
-                    "按钮6D位姿已锁定并停止YOLO推理：%s position=(%.6f, %.6f, %.6f)m quaternion=(%.6f, %.6f, %.6f, %.6f) "
+                    "按钮6D位姿已发布，回到空闲等待下一次触发：%s position=(%.6f, %.6f, %.6f)m quaternion=(%.6f, %.6f, %.6f, %.6f) "
                     "RPY=(%.2f, %.2f, %.2f)deg",
                     base_frame_id_.c_str(), pose_message.pose.position.x, pose_message.pose.position.y, pose_message.pose.position.z,
                     base_orientation.x(), base_orientation.y(), base_orientation.z(), base_orientation.w(), roll, pitch, yaw);
@@ -452,6 +471,48 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
                     camera_orientation.y(), camera_orientation.z(), camera_orientation.w());
     }
 
+    void triggerCallback(const std_msgs::msg::Bool::ConstSharedPtr message) {
+        if (!message->data) { return; }
+        if (state_ == CaptureState::Detecting) {
+            RCLCPP_WARN(this->get_logger(), "检测进行中，忽略本次触发");
+            return;
+        }
+        state_ = CaptureState::Settling;
+        settle_start_time_ = std::chrono::steady_clock::now();
+        stable_samples_.clear();
+        RCLCPP_INFO(this->get_logger(), "收到检测触发，等待%.2fs让机械臂停稳后开始推理", trigger_settle_duration_);
+    }
+
+    void timeoutCallback() {
+        const auto now = std::chrono::steady_clock::now();
+        if (state_ == CaptureState::Settling) {
+            if (now - settle_start_time_ >= std::chrono::duration<double>(trigger_settle_duration_)) {
+                state_ = CaptureState::Detecting;
+                detection_start_time_ = now;
+                stable_samples_.clear();
+                RCLCPP_INFO(this->get_logger(), "机械臂稳定等待结束，开始按钮检测");
+            }
+            return;
+        }
+        if (state_ == CaptureState::Detecting &&
+            now - detection_start_time_ >= std::chrono::duration<double>(detection_timeout_)) {
+            publishStatus(false);
+            state_ = CaptureState::Idle;
+            stable_samples_.clear();
+            RCLCPP_ERROR(this->get_logger(), "检测超时：%.2fs内未获得稳定的按钮6D位姿，回到空闲等待下一次触发",
+                         detection_timeout_);
+        }
+    }
+
+    void publishStatus(bool success) {
+        std_msgs::msg::Bool message;
+        message.data = success;
+        status_pub_->publish(message);
+        RCLCPP_INFO(this->get_logger(), "发布%s=%s", status_topic_.c_str(), success ? "true" : "false");
+    }
+
+    std::string trigger_topic_;
+    std::string status_topic_;
     std::string current_pose_topic_;
     std::string output_pose_topic_;
     std::string output_pose_link6_topic_;
@@ -461,6 +522,8 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     std::string camera_frame_id_;
     double depth_scale_{0.001};
     double current_pose_timeout_{0.5};
+    double trigger_settle_duration_{0.5};
+    double detection_timeout_{10.0};
     int required_stable_detections_{5};
     double maximum_pixel_shift_{3.0};
     double maximum_depth_change_{0.005};
@@ -476,7 +539,9 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     double cy_{0.0};
     bool camera_info_available_{false};
     bool current_pose_available_{false};
-    bool position_locked_{false};
+    CaptureState state_{CaptureState::Idle};
+    std::chrono::steady_clock::time_point settle_start_time_{};
+    std::chrono::steady_clock::time_point detection_start_time_{};
     std::chrono::steady_clock::time_point current_pose_update_time_{};
     Eigen::Matrix3d camera_to_tool_rotation_{Eigen::Matrix3d::Identity()};
     Eigen::Vector3d camera_to_tool_translation_{Eigen::Vector3d::Zero()};
@@ -492,6 +557,9 @@ class ButtonPositionCaptureNode : public rclcpp::Node {
     rclcpp::Publisher<PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<PoseStamped>::SharedPtr link6_pose_pub_;
     rclcpp::Publisher<PoseStamped>::SharedPtr camera_pose_pub_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr status_pub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr trigger_sub_;
+    rclcpp::TimerBase::SharedPtr timeout_timer_;
 };
 
 int main(int argc, char **argv) {

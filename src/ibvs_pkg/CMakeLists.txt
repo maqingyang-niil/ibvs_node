@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -60,6 +61,7 @@ ament_target_dependencies(button_position_capture_node
   rclcpp
   sensor_msgs
   geometry_msgs
+  std_msgs
   message_filters
   cv_bridge
 )

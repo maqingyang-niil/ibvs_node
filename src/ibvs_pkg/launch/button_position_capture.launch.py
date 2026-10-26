@@ -20,6 +20,10 @@ def generate_launch_description():
     link6_frame_id = LaunchConfiguration("link6_frame_id")
     camera_frame_id = LaunchConfiguration("camera_frame_id")
     required_stable_detections = LaunchConfiguration("required_stable_detections")
+    trigger_topic = LaunchConfiguration("trigger_topic")
+    status_topic = LaunchConfiguration("status_topic")
+    trigger_settle_duration = LaunchConfiguration("trigger_settle_duration")
+    detection_timeout = LaunchConfiguration("detection_timeout")
 
     launch_arguments = [
         DeclareLaunchArgument(
@@ -72,6 +76,26 @@ def generate_launch_description():
             default_value="5",
             description="锁定按钮位置所需的连续稳定检测次数",
         ),
+        DeclareLaunchArgument(
+            "trigger_topic",
+            default_value="/ibvs/capture_trigger",
+            description="收到std_msgs/Bool(true)后执行一次按钮检测",
+        ),
+        DeclareLaunchArgument(
+            "status_topic",
+            default_value="/ibvs/capture_success",
+            description="单次检测结果（true=成功，false=超时失败）",
+        ),
+        DeclareLaunchArgument(
+            "trigger_settle_duration",
+            default_value="0.5",
+            description="触发后等待机械臂停稳的秒数，期间不推理",
+        ),
+        DeclareLaunchArgument(
+            "detection_timeout",
+            default_value="10.0",
+            description="触发后未锁定按钮位姿的超时秒数",
+        ),
     ]
 
     realsense_launch = IncludeLaunchDescription(
@@ -104,6 +128,10 @@ def generate_launch_description():
             "link6_frame_id": ParameterValue(link6_frame_id, value_type=str),
             "camera_frame_id": ParameterValue(camera_frame_id, value_type=str),
             "required_stable_detections": ParameterValue(required_stable_detections, value_type=int),
+            "trigger_topic": ParameterValue(trigger_topic, value_type=str),
+            "status_topic": ParameterValue(status_topic, value_type=str),
+            "trigger_settle_duration": ParameterValue(trigger_settle_duration, value_type=float),
+            "detection_timeout": ParameterValue(detection_timeout, value_type=float),
         }],
     )
 
