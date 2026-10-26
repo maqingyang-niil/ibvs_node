@@ -1,11 +1,12 @@
 #pragma once
 
-#include "ibvs_controller.hpp"
+#include <opencv2/core.hpp>
 
 struct DetectionResult {
     bool success{false};
-    IbvsController::PixelPoints pixel_points{};
-    IbvsController::Depths depths{IbvsController::Depths::Zero()};
+    bool detected{false};
+    cv::Point2f center_pixel{};
+    cv::Rect2f bounding_box{};
+    double depth{0.0};
     double confidence{0.0};
-    int invalid_depth_index{-1};
 };

@@ -23,13 +23,9 @@ void YoloRedButtonDetector::TensorRtLogger::log(Severity severity, const char *m
 }
 
 YoloRedButtonDetector::YoloRedButtonDetector(const std::string &engine_path, double depth_scale, float confidence_threshold, float nms_threshold,
-                                             int input_size, int button_class_id, double maximum_center_offset_ratio,
-                                             float desired_center_u_ratio, float desired_center_v_ratio, float desired_radius_ratio,
-                                             float feature_offset_ratio)
+                                             int input_size, int button_class_id)
     : depth_scale_(depth_scale), confidence_threshold_(confidence_threshold), nms_threshold_(nms_threshold), input_size_(input_size),
-      button_class_id_(button_class_id),
-      maximum_center_offset_ratio_(maximum_center_offset_ratio), desired_center_u_ratio_(desired_center_u_ratio),
-      desired_center_v_ratio_(desired_center_v_ratio), desired_radius_ratio_(desired_radius_ratio), feature_offset_ratio_(feature_offset_ratio) {
+      button_class_id_(button_class_id) {
     if (engine_path.empty()) { throw std::invalid_argument("TensorRT engine路径为空"); }
     if (!std::isfinite(depth_scale_) || depth_scale_ <= 0.0) { throw std::invalid_argument("深度比例必须是有效正数"); }
     if (!std::isfinite(confidence_threshold_) || confidence_threshold_ < 0.0F || confidence_threshold_ > 1.0F) {
@@ -40,20 +36,6 @@ YoloRedButtonDetector::YoloRedButtonDetector(const std::string &engine_path, dou
     }
     if (input_size_ <= 0) { throw std::invalid_argument("YOLO输入尺寸必须为正数"); }
     if (button_class_id_ < 0) { throw std::invalid_argument("YOLO按钮类别编号不能为负数"); }
-    if (!std::isfinite(maximum_center_offset_ratio_) || maximum_center_offset_ratio_ <= 0.0 || maximum_center_offset_ratio_ > 1.0) {
-        throw std::invalid_argument("按钮最大中心偏移比例必须在(0,1]范围内");
-    }
-    if (!std::isfinite(desired_center_u_ratio_) || !std::isfinite(desired_center_v_ratio_) || desired_center_u_ratio_ < 0.0F ||
-        desired_center_u_ratio_ > 1.0F || desired_center_v_ratio_ < 0.0F || desired_center_v_ratio_ > 1.0F) {
-        throw std::invalid_argument("期望按钮中心比例必须在[0,1]范围内");
-    }
-    if (!std::isfinite(desired_radius_ratio_) || desired_radius_ratio_ <= 0.0F || desired_radius_ratio_ > 0.5F) {
-        throw std::invalid_argument("期望按钮半径比例必须在(0,0.5]范围内");
-    }
-    if (!std::isfinite(feature_offset_ratio_) || feature_offset_ratio_ <= 0.0F || feature_offset_ratio_ >= 0.70F) {
-        throw std::invalid_argument("按钮特征点偏移比例必须在(0,0.70)范围内");
-    }
-
     try {
         initializeTensorRt(engine_path);
     } catch (...) {
@@ -208,8 +190,6 @@ std::optional<YoloRedButtonDetector::ButtonBox> YoloRedButtonDetector::detectBes
         predictions = raw.clone();
     }
 
-    const cv::Point2f desired_center(desired_center_u_ratio_ * static_cast<float>(image.cols),
-                                     desired_center_v_ratio_ * static_cast<float>(image.rows));
     std::vector<cv::Rect> candidate_boxes;
     std::vector<float> candidate_scores;
     for (int row_index = 0; row_index < predictions.rows; ++row_index) {
@@ -238,12 +218,6 @@ std::optional<YoloRedButtonDetector::ButtonBox> YoloRedButtonDetector::detectBes
         const int height = integer_bottom - integer_top;
         if (width < 2 || height < 2) { continue; }
 
-        const cv::Point2f center(0.5F * static_cast<float>(integer_left + integer_right),
-                                 0.5F * static_cast<float>(integer_top + integer_bottom));
-        const double normalized_u_offset = static_cast<double>(center.x - desired_center.x) / static_cast<double>(image.cols);
-        const double normalized_v_offset = static_cast<double>(center.y - desired_center.y) / static_cast<double>(image.rows);
-        if (std::hypot(normalized_u_offset, normalized_v_offset) > maximum_center_offset_ratio_) { continue; }
-
         candidate_boxes.emplace_back(integer_left, integer_top, width, height);
         candidate_scores.push_back(score);
     }
@@ -259,20 +233,6 @@ std::optional<YoloRedButtonDetector::ButtonBox> YoloRedButtonDetector::detectBes
     return ButtonBox{cv::Rect2f(candidate_boxes[best_index]), candidate_scores[best_index]};
 }
 
-IbvsController::PixelPoints YoloRedButtonDetector::circleToPoints(const cv::Point2f &center, float radius) const {
-    const float offset = feature_offset_ratio_ * radius;
-    return {cv::Point2f(center.x - offset, center.y - offset), cv::Point2f(center.x + offset, center.y - offset),
-            cv::Point2f(center.x + offset, center.y + offset), cv::Point2f(center.x - offset, center.y + offset)};
-}
-
-IbvsController::PixelPoints YoloRedButtonDetector::desiredPixelPoints(const cv::Size &image_size) const {
-    if (image_size.width <= 0 || image_size.height <= 0) { throw std::invalid_argument("实时图像尺寸无效"); }
-    const cv::Point2f center(desired_center_u_ratio_ * static_cast<float>(image_size.width),
-                             desired_center_v_ratio_ * static_cast<float>(image_size.height));
-    const float radius = desired_radius_ratio_ * static_cast<float>(std::min(image_size.width, image_size.height));
-    return circleToPoints(center, radius);
-}
-
 DetectionResult YoloRedButtonDetector::detect(const cv::Mat &color_image, const cv::Mat &depth_image, const std::string &depth_encoding) {
     DetectionResult result;
     if (color_image.empty() || depth_image.empty() || color_image.size() != depth_image.size()) { return result; }
@@ -284,15 +244,14 @@ DetectionResult YoloRedButtonDetector::detect(const cv::Mat &color_image, const 
     const float radius = 0.5F * std::min(button->box.width, button->box.height);
     if (!std::isfinite(radius) || radius < 2.0F) { return result; }
 
+    result.detected = true;
+    result.center_pixel = center;
+    result.bounding_box = button->box;
     result.confidence = button->confidence;
-    result.pixel_points = circleToPoints(center, radius);
     const double depth = readDepthMedian(depth_image, center, radius, depth_encoding);
-    if (!std::isfinite(depth) || depth <= 0.0) {
-        result.invalid_depth_index = 0;
-        return result;
-    }
+    if (!std::isfinite(depth) || depth <= 0.0) { return result; }
 
-    result.depths.setConstant(depth);
+    result.depth = depth;
     result.success = true;
     return result;
 }

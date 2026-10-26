@@ -13,15 +13,11 @@
 class YoloRedButtonDetector {
   public:
     YoloRedButtonDetector(const std::string &engine_path, double depth_scale, float confidence_threshold = 0.5F, float nms_threshold = 0.45F,
-                          int input_size = 640, int button_class_id = 0, double maximum_center_offset_ratio = 0.25,
-                          float desired_center_u_ratio = 0.5F, float desired_center_v_ratio = 0.5F, float desired_radius_ratio = 0.08F,
-                          float feature_offset_ratio = 0.35F);
+                          int input_size = 640, int button_class_id = 0);
 
     ~YoloRedButtonDetector();
 
     DetectionResult detect(const cv::Mat &color_image, const cv::Mat &depth_image, const std::string &depth_encoding);
-
-    IbvsController::PixelPoints desiredPixelPoints(const cv::Size &image_size) const;
 
   private:
     class TensorRtLogger : public nvinfer1::ILogger {
@@ -44,8 +40,6 @@ class YoloRedButtonDetector {
     LetterboxResult letterbox(const cv::Mat &image) const;
 
     std::optional<ButtonBox> detectBestButton(const cv::Mat &image);
-
-    IbvsController::PixelPoints circleToPoints(const cv::Point2f &center, float radius) const;
 
     double readDepthMedian(const cv::Mat &depth_image, const cv::Point2f &center, float radius, const std::string &depth_encoding) const;
 
@@ -74,9 +68,4 @@ class YoloRedButtonDetector {
     float nms_threshold_;
     int input_size_;
     int button_class_id_;
-    double maximum_center_offset_ratio_;
-    float desired_center_u_ratio_;
-    float desired_center_v_ratio_;
-    float desired_radius_ratio_;
-    float feature_offset_ratio_;
 };

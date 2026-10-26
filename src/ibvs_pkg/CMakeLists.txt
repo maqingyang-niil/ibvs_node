@@ -38,62 +38,25 @@ if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_LIBRARY)
   message(FATAL_ERROR "找不到TensorRT开发文件，请确认已安装NvInfer.h和libnvinfer.so")
 endif()
 
-add_executable(ibvs_node
-  src/ibvs_node.cpp
-  src/ibvs_controller.cpp
+add_executable(button_position_capture_node
+  src/button_position_capture_node.cpp
   src/yolo_red_button_detector.cpp
 )
 
-add_executable(hand_velocity_node
-  src/hand_velocity_node.cpp
-)
-
-add_executable(hand_delta_pose_node
-  src/hand_delta_pose_node.cpp
-)
-
-add_executable(hand_new_pose_node
-  src/hand_new_pose_node.cpp
-)
-
-target_include_directories(ibvs_node PRIVATE
+target_include_directories(button_position_capture_node PRIVATE
   include
   ${OpenCV_INCLUDE_DIRS}
   ${TENSORRT_INCLUDE_DIR}
 )
 
-target_include_directories(hand_velocity_node PRIVATE
-  include
-)
-
-target_include_directories(hand_delta_pose_node PRIVATE
-  include
-)
-
-target_include_directories(hand_new_pose_node PRIVATE
-  include
-)
-
-target_link_libraries(ibvs_node
+target_link_libraries(button_position_capture_node
   Eigen3::Eigen
   ${OpenCV_LIBRARIES}
   ${TENSORRT_LIBRARY}
   CUDA::cudart
 )
 
-target_link_libraries(hand_velocity_node
-  Eigen3::Eigen
-)
-
-target_link_libraries(hand_delta_pose_node
-  Eigen3::Eigen
-)
-
-target_link_libraries(hand_new_pose_node
-  Eigen3::Eigen
-)
-
-ament_target_dependencies(ibvs_node
+ament_target_dependencies(button_position_capture_node
   rclcpp
   sensor_msgs
   geometry_msgs
@@ -101,26 +64,8 @@ ament_target_dependencies(ibvs_node
   cv_bridge
 )
 
-ament_target_dependencies(hand_velocity_node
-  rclcpp
-  geometry_msgs
-)
-
-ament_target_dependencies(hand_delta_pose_node
-  rclcpp
-  geometry_msgs
-)
-
-ament_target_dependencies(hand_new_pose_node
-  rclcpp
-  geometry_msgs
-)
-
 install(TARGETS
-  ibvs_node
-  hand_velocity_node
-  hand_delta_pose_node
-  hand_new_pose_node
+  button_position_capture_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
